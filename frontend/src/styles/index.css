@@ -1,0 +1,60 @@
+@import "tailwindcss";
+@import "@fontsource/orbitron/400.css";
+@import "@fontsource/orbitron/700.css";
+@import "@fontsource/rajdhani/400.css";
+@import "@fontsource/rajdhani/600.css";
+
+/* ── Cyberpunk design tokens ───────────────────────────────── */
+:root {
+  --color-bg: #0a0a0f;
+  --color-surface: #12121a;
+  --color-border: #1e1e2e;
+  --color-neon-cyan: #00ffff;
+  --color-neon-pink: #ff00ff;
+  --color-neon-green: #39ff14;
+  --color-text: #e0e0f0;
+  --color-text-muted: #6b7280;
+
+  --glow-cyan: 0 0 8px #00ffff, 0 0 20px #00ffff66;
+  --glow-pink: 0 0 8px #ff00ff, 0 0 20px #ff00ff66;
+  --glow-green: 0 0 8px #39ff14, 0 0 20px #39ff1466;
+
+  --font-display: "Orbitron", sans-serif;
+  --font-body: "Rajdhani", sans-serif;
+}
+
+/* ── Tailwind theme extension ──────────────────────────────── */
+@theme {
+  --color-bg: #0a0a0f;
+  --color-surface: #12121a;
+  --color-border: #1e1e2e;
+  --color-neon-cyan: #00ffff;
+  --color-neon-pink: #ff00ff;
+  --color-neon-green: #39ff14;
+  --color-cp-text: #e0e0f0;
+  --color-cp-muted: #6b7280;
+
+  --font-display: "Orbitron", sans-serif;
+  --font-body: "Rajdhani", sans-serif;
+}
+
+/* ── Base reset ────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+}
+
+/* ── Glow utilities ────────────────────────────────────────── */
+.cp-glow-cyan { box-shadow: var(--glow-cyan); }
+.cp-glow-pink { box-shadow: var(--glow-pink); }
+.cp-glow-green { box-shadow: var(--glow-green); }
+.cp-text-glow-cyan { text-shadow: var(--glow-cyan); }
+.cp-text-glow-pink { text-shadow: var(--glow-pink); }

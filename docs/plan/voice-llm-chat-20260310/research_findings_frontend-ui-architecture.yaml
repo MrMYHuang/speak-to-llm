@@ -1,0 +1,433 @@
+plan_id: voice-llm-chat-20260310
+objective: Build a fullstack voice-first LLM chat app (React+Vite7+TS frontend, Python backend)
+focus_area: frontend-ui-architecture
+created_at: "2026-03-10"
+created_by: gem-team/gem-researcher
+status: completed
+
+tldr: |
+  - Single-page React+Vite7+TypeScript app; no router needed — one view, multiple state phases.
+  - State machine pattern (idle→recording→processing→responding) via useReducer; MediaRecorder+WebSocket refs kept outside React render cycle.
+  - Four UI zones: TopBar (connection status), ChatThread (scrollable messages), WaveformBar (live amplitude), BottomBar (mic button + transcript preview).
+  - Cyberpunk theme via Tailwind CSS 4 custom tokens: near-black bg (#0a0a0f), neon-cyan (#00FFFF), neon-pink (#FF00FF), Orbitron/Rajdhani fonts, CSS box-shadow glow utilities.
+  - Key risks: browser MIME type variability (audio/webm;codecs=opus preferred), microphone permission UX, WebSocket reconnection on backend restart, Safari MediaRecorder gaps.
+
+research_metadata:
+  methodology: >
+    Web research (Vite 7 best practices 2025, React MediaRecorder+WebSocket hook patterns,
+    cyberpunk Tailwind CSS themes), cross-referenced with known browser API constraints and
+    React state management patterns for audio/streaming apps.
+  tools_used:
+    - web_search
+    - bash (Node.js logic verification)
+  scope: >
+    Full frontend architecture: folder layout, component tree, state model, styling system,
+    dependency set, and edge-case risks. Backend interface surface included only at the
+    WebSocket message contract boundary.
+  confidence: high
+  coverage: 95  # workspace is empty; findings are design-phase recommendations grounded in research
+
+files_analyzed:
+  - file: prompts.md
+    path: /Users/myh/Documents/speak-to-llm/prompts.md
+    purpose: Project brief — confirms tech stack, cyberpunk style requirement, WebSocket+Whisper pipeline
+    key_elements:
+      - element: stack declaration
+        type: variable
+        location: prompts.md:5-8
+        description: React, Vite 7, TypeScript frontend; Python/Whisper/LM Studio backend
+    language: Markdown
+    lines: 8
+
+patterns_found:
+  - category: architecture
+    pattern: React state machine via useReducer
+    description: >
+      Audio recording flows through discrete phases (idle, requesting-mic, recording, uploading,
+      processing, responding, error). useReducer maps naturally to this; avoids scattered useState
+      flags that can get out of sync.
+    examples:
+      - file: src/store/chatReducer.ts (to be created)
+        location: src/store/chatReducer.ts:1
+        snippet: |
+          type Phase = 'idle' | 'requesting-mic' | 'recording' | 'processing' | 'responding' | 'error';
+          interface ChatState {
+            phase: Phase;
+            wsStatus: 'disconnected' | 'connecting' | 'connected' | 'error';
+            transcript: string;
+            messages: Message[];
+            errorMessage: string | null;
+          }
+    prevalence: common
+
+  - category: architecture
+    pattern: Refs for imperative browser APIs
+    description: >
+      MediaRecorder and WebSocket are mutable imperative objects that must NOT be stored in React
+      state (triggers unnecessary re-renders). Store them in useRef and interact via callback hooks.
+    examples:
+      - file: src/hooks/useAudioStream.ts (to be created)
+        location: src/hooks/useAudioStream.ts:1
+        snippet: |
+          const socketRef = useRef<WebSocket | null>(null);
+          const recorderRef = useRef<MediaRecorder | null>(null);
+    prevalence: common
+
+  - category: structure
+    pattern: Feature-scoped hooks barrel
+    description: >
+      Each major capability (audio recording, WebSocket messaging, waveform analysis) lives in its
+      own hook file under src/hooks/. Components stay presentation-only; all I/O logic in hooks.
+    examples:
+      - file: src/hooks/ (to be created)
+        location: src/hooks/index.ts
+        snippet: |
+          export { useAudioStream } from './useAudioStream';
+          export { useWebSocket } from './useWebSocket';
+          export { useWaveform } from './useWaveform';
+    prevalence: common
+
+  - category: naming
+    pattern: PascalCase components, camelCase hooks, SCREAMING_SNAKE constants
+    description: Standard React/TS community convention; apply consistently for tooling compatibility.
+    examples:
+      - file: src/components/MicButton.tsx
+        location: src/components/MicButton.tsx:1
+        snippet: "export const MicButton: React.FC<MicButtonProps> = ..."
+    prevalence: common
+
+  - category: structure
+    pattern: CSS custom property design tokens in index.css
+    description: >
+      Cyberpunk palette defined as CSS vars on :root, referenced in Tailwind theme extension.
+      Allows runtime theme switching and keeps neon colors DRY.
+    examples:
+      - file: src/styles/index.css (to be created)
+        location: src/styles/index.css:1
+        snippet: |
+          :root {
+            --color-bg:       #0a0a0f;
+            --color-surface:  #12121a;
+            --color-neon-cyan: #00FFFF;
+            --color-neon-pink: #FF00FF;
+            --color-neon-green: #39FF14;
+            --color-text:     #e0e0f0;
+            --glow-cyan: 0 0 8px #00FFFF, 0 0 20px #00FFFF66;
+            --glow-pink: 0 0 8px #FF00FF, 0 0 20px #FF00FF66;
+          }
+    prevalence: common
+
+  - category: architecture
+    pattern: WebSocket message protocol (JSON envelope)
+    description: >
+      Binary frames carry raw audio chunks. Text frames carry JSON control messages.
+      Frontend sends: audio blobs (binary). Backend sends: JSON {type, payload} text frames.
+    examples:
+      - file: src/types/ws.ts (to be created)
+        location: src/types/ws.ts:1
+        snippet: |
+          export type ServerMessage =
+            | { type: 'transcript'; text: string }
+            | { type: 'llm_response'; text: string }
+            | { type: 'error'; message: string }
+            | { type: 'status'; state: 'transcribing' | 'thinking' };
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: App
+      responsibility: Root component; owns ChatState via useReducer; wires hooks to child components
+      location: src/App.tsx
+      relationship_to_domain: top-level orchestrator
+
+    - component: TopBar
+      responsibility: Displays app title and WebSocket connection status badge
+      location: src/components/TopBar.tsx
+      relationship_to_domain: reads wsStatus from context/props
+
+    - component: ChatThread
+      responsibility: Scrollable list of user transcript and assistant response Message bubbles
+      location: src/components/ChatThread.tsx
+      relationship_to_domain: renders messages[] from state; auto-scrolls on new message
+
+    - component: MessageBubble
+      responsibility: Single message item; styled differently for user vs assistant role
+      location: src/components/MessageBubble.tsx
+      relationship_to_domain: pure presentational; no state
+
+    - component: WaveformBar
+      responsibility: Real-time audio amplitude visualisation using Canvas/Web Audio AnalyserNode
+      location: src/components/WaveformBar.tsx
+      relationship_to_domain: active only during 'recording' phase; reads analyserRef from useWaveform
+
+    - component: BottomBar
+      responsibility: Contains MicButton and TranscriptPreview; main user interaction zone
+      location: src/components/BottomBar.tsx
+      relationship_to_domain: dispatches startRecording/stopRecording actions
+
+    - component: MicButton
+      responsibility: Large neon push-to-talk button; visual state indicates recording/processing/idle
+      location: src/components/MicButton.tsx
+      relationship_to_domain: triggers audio start/stop; CSS animation class driven by phase
+
+    - component: StatusOverlay
+      responsibility: Full-screen semi-transparent overlay showing "Transcribing…" / "Thinking…" status
+      location: src/components/StatusOverlay.tsx
+      relationship_to_domain: shown during 'processing' and 'responding' phases
+
+  interfaces_used_by_domain:
+    - interface: MediaDevices.getUserMedia
+      location: browser (Web API)
+      usage_pattern: called in useAudioStream.start(); stream fed to MediaRecorder and AudioContext
+
+    - interface: MediaRecorder
+      location: browser (Web API)
+      usage_pattern: >
+        recorder.start(250) for 250ms chunk intervals; ondataavailable sends blob via WebSocket;
+        onstop signals end-of-utterance to backend with a sentinel JSON frame
+
+    - interface: WebSocket
+      location: browser (Web API)
+      usage_pattern: >
+        ws://localhost:8765 (dev); binaryType='arraybuffer' or 'blob';
+        onmessage parses JSON ServerMessage and dispatches to chatReducer
+
+    - interface: Web Audio API (AudioContext + AnalyserNode)
+      location: browser (Web API)
+      usage_pattern: >
+        AnalyserNode.getByteTimeDomainData() drives WaveformBar canvas rendering at ~60fps via rAF
+
+  data_flow_involving_domain: |
+    User clicks MicButton
+      → useAudioStream.start()
+        → getUserMedia() → MediaRecorder.start(250)
+        → AudioContext/AnalyserNode branch → WaveformBar canvas
+        → WebSocket open (if not already)
+      → App phase: 'recording'
+
+    MediaRecorder.ondataavailable (every 250ms)
+      → ws.send(blob)   [binary frame]
+
+    User clicks MicButton again (or VAD silence detected)
+      → MediaRecorder.stop()
+      → ws.send(JSON.stringify({type:'end_of_speech'}))
+      → App phase: 'processing'
+
+    WebSocket.onmessage (type:'transcript')
+      → dispatch({ type: 'SET_TRANSCRIPT', text })
+      → App phase: 'responding' (waiting for LLM)
+
+    WebSocket.onmessage (type:'llm_response')
+      → dispatch({ type: 'ADD_MESSAGE', role:'assistant', text })
+      → App phase: 'idle'
+
+  key_relationships_to_domain:
+    - from: App
+      to: useAudioStream
+      relationship: calls
+    - from: App
+      to: useWebSocket
+      relationship: calls
+    - from: useAudioStream
+      to: useWaveform
+      relationship: composes (shares AudioContext stream)
+    - from: App
+      to: ChatState (useReducer)
+      relationship: owns
+    - from: ChatThread
+      to: ChatState.messages
+      relationship: reads
+    - from: BottomBar
+      to: ChatState.phase
+      relationship: reads
+    - from: MicButton
+      to: useAudioStream.start/stop
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript 5.x (strict mode)
+    - CSS (custom properties + Tailwind utilities)
+
+  frameworks_used_in_domain:
+    - name: React 19
+      usage_in_domain: Component tree, hooks, context for theme/state distribution
+    - name: Vite 7
+      usage_in_domain: >
+        Dev server with HMR, Rolldown-based production build, path aliases (@/),
+        env vars (VITE_WS_URL), proxy config for local WS backend
+
+  libraries_used_in_domain:
+    - name: tailwindcss 4.x
+      purpose_in_domain: Utility-first styling; custom theme tokens for cyberpunk palette; glow animations
+    - name: zustand (optional, small app)
+      purpose_in_domain: >
+        Alternative to prop-drilling ChatState if component tree deepens; useReducer preferred
+        for initial implementation due to explicit state machine semantics
+    - name: framer-motion
+      purpose_in_domain: MicButton pulse animation, message bubble entrance animations, phase transitions
+    - name: lucide-react
+      purpose_in_domain: Icon set (mic, wifi, loader) — tree-shakeable, TypeScript-typed
+    - name: clsx / tailwind-merge
+      purpose_in_domain: Conditional className composition without specificity conflicts
+
+  external_apis_used_in_domain:
+    - name: Backend WebSocket (Python)
+      integration_point: ws://localhost:8765 (dev) — audio binary stream in, JSON messages out
+
+related_conventions:
+  naming_patterns_in_domain: >
+    Components: PascalCase files in src/components/.
+    Hooks: useXxx in src/hooks/.
+    Types: PascalCase interfaces/types in src/types/.
+    Constants: SCREAMING_SNAKE in src/constants/.
+    CSS classes: Tailwind utilities preferred; custom classes use kebab-case with cp- prefix (cp-glow-cyan).
+
+  structure_of_domain: |
+    src/
+    ├── components/
+    │   ├── TopBar.tsx
+    │   ├── ChatThread.tsx
+    │   ├── MessageBubble.tsx
+    │   ├── WaveformBar.tsx
+    │   ├── BottomBar.tsx
+    │   ├── MicButton.tsx
+    │   └── StatusOverlay.tsx
+    ├── hooks/
+    │   ├── useAudioStream.ts    # MediaRecorder + mic permission
+    │   ├── useWebSocket.ts      # WS lifecycle + message dispatch
+    │   └── useWaveform.ts       # AudioContext AnalyserNode + canvas drawing
+    ├── store/
+    │   └── chatReducer.ts       # State machine: ChatState + Action union + reducer fn
+    ├── types/
+    │   ├── chat.ts              # Message, Phase, ChatState types
+    │   └── ws.ts                # ServerMessage discriminated union
+    ├── constants/
+    │   └── config.ts            # WS_URL, AUDIO_MIME_TYPE, CHUNK_INTERVAL_MS
+    ├── styles/
+    │   └── index.css            # CSS custom property tokens + Tailwind base
+    ├── App.tsx                  # Root: useReducer + hooks wiring
+    └── main.tsx                 # Vite entry; StrictMode
+
+  error_handling_in_domain: >
+    getUserMedia denial → dispatch ERROR phase with user-friendly message; show retry prompt.
+    WebSocket close/error → wsStatus='error'; auto-reconnect with exponential backoff (max 5 retries).
+    MediaRecorder.onerror → stop recording, dispatch ERROR, log details.
+    Unsupported MIME type → fallback: audio/webm → audio/ogg → audio/mp4 via MediaRecorder.isTypeSupported().
+
+  testing_in_domain: >
+    Vitest + @testing-library/react for component unit tests.
+    Mock WebSocket via mock-socket or vi.stubGlobal.
+    Mock getUserMedia via navigator.mediaDevices stub.
+    E2E: Playwright with microphone permission override in browser context.
+
+  documentation_in_domain: >
+    JSDoc on hook return types and reducer actions.
+    README.md documents env vars (VITE_WS_URL), dev setup, and Tailwind theme token reference.
+
+related_dependencies:
+  internal:
+    - component: Python WebSocket backend
+      relationship_to_domain: provides transcript + LLM response via WS text frames
+      direction: inbound
+    - component: Vite dev server proxy config
+      relationship_to_domain: forwards /ws to backend avoiding CORS in dev
+      direction: outbound
+
+  external:
+    - name: react + react-dom
+      purpose_for_domain: UI rendering
+    - name: typescript
+      purpose_for_domain: type safety, strict compiler options
+    - name: tailwindcss + @tailwindcss/vite
+      purpose_for_domain: styling pipeline integrated into Vite
+    - name: framer-motion
+      purpose_for_domain: animation primitives for cyberpunk micro-interactions
+    - name: lucide-react
+      purpose_for_domain: icon components
+    - name: clsx + tailwind-merge
+      purpose_for_domain: className utility composition
+    - name: vitest + @testing-library/react
+      purpose_for_domain: unit test framework
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: Microphone access
+      location: src/hooks/useAudioStream.ts
+      concern: >
+        getUserMedia must only be called on user gesture (click). Do NOT auto-request on load.
+        Permissions API can be queried first (navigator.permissions.query({name:'microphone'}))
+        to show appropriate prompt UI before requesting.
+    - area: WebSocket origin
+      location: src/hooks/useWebSocket.ts
+      concern: >
+        In production, use WSS (wss://). In dev, ws://localhost is acceptable.
+        Backend should validate origin header to prevent cross-site WebSocket hijacking.
+  authentication_patterns_in_domain: N/A (local LM Studio deployment, no auth required initially)
+  authorization_patterns_in_domain: N/A
+  data_validation_in_domain: >
+    All incoming WebSocket messages must be validated against ServerMessage discriminated union
+    before dispatch. Malformed JSON should be caught and dispatched as ERROR phase.
+
+testing_patterns:
+  framework: Vitest + @testing-library/react + Playwright (E2E)
+  coverage_areas:
+    - chatReducer state transitions (pure function, easy to test exhaustively)
+    - MessageBubble rendering per role (user/assistant)
+    - MicButton disabled states by phase
+    - useWebSocket reconnect logic with mock-socket
+    - useAudioStream MIME type fallback selection
+  test_organization: >
+    Unit tests co-located as *.test.tsx alongside source files.
+    E2E tests in e2e/ at repo root.
+  mock_patterns:
+    - vi.stubGlobal('WebSocket', MockWebSocket) for WS hook tests
+    - navigator.mediaDevices.getUserMedia = vi.fn().mockResolvedValue(mockStream)
+    - HTMLCanvasElement.prototype.getContext mocked for WaveformBar canvas tests
+
+open_questions:
+  - question: Should recording be push-to-talk (hold/click) or VAD (voice activity detection)?
+    context: >
+      VAD requires AudioWorklet + threshold logic on frontend, or silence detection on backend.
+      Push-to-talk is simpler and more reliable for MVP. Both approaches affect the
+      MicButton UX and end_of_speech signal timing.
+
+  - question: Does WaveformBar use Canvas 2D API or WebGL?
+    context: >
+      Canvas 2D is sufficient for a simple bar/line waveform. WebGL (via Three.js or raw)
+      unlocks more elaborate cyberpunk visual effects but adds bundle size and complexity.
+
+  - question: Should the chat thread persist across page reloads?
+    context: >
+      localStorage/IndexedDB persistence of messages[] is a UX improvement but adds
+      complexity. Relevant to whether a useEffect sync to storage is needed in chatReducer.
+
+  - question: What is the exact binary format the Python backend expects?
+    context: >
+      Whisper works best with 16kHz mono PCM WAV. MediaRecorder typically outputs audio/webm
+      (Opus codec). Backend may need to handle format conversion (ffmpeg/soundfile), OR frontend
+      could use AudioWorklet to emit raw PCM. This affects useAudioStream implementation.
+
+  - question: Will the LLM response stream token-by-token or arrive as a complete message?
+    context: >
+      If streaming, the WS protocol needs a token-delta message type and ChatThread must
+      support partial message rendering (streaming cursor effect). If batch, simpler.
+
+gaps:
+  - area: Backend WebSocket message contract (exact field names/types)
+    description: Python backend not yet built; ServerMessage types are assumed based on common patterns
+    impact: >
+      Types in src/types/ws.ts may need adjustment once backend is implemented.
+      Low risk — types are easily updated.
+
+  - area: Audio format negotiation with Whisper backend
+    description: >
+      Whether backend accepts audio/webm directly or requires PCM is unknown.
+      Affects useAudioStream implementation significantly (webm passthrough vs AudioWorklet PCM).
+    impact: >
+      High impact on useAudioStream complexity. If PCM required, AudioWorklet adds
+      ~100 lines of additional code and a separate worklet JS file.
+
+  - area: Deployment target (localhost only vs production URL)
+    description: VITE_WS_URL and CSP headers not yet defined
+    impact: Low for MVP; relevant before any deployment beyond localhost.

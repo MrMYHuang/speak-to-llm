@@ -1,0 +1,810 @@
+plan_id: voice-llm-chat-20260310
+objective: >
+  Build a fullstack voice-first LLM chat app from an empty workspace:
+  React + Vite 7 + TypeScript cyberpunk frontend streams microphone audio over
+  WebSocket to a Python/FastAPI backend, which transcribes with Whisper and
+  forwards the transcript to an LM Studio OpenAI-compatible endpoint, then returns
+  the assistant response for display.
+created_at: "2026-03-10"
+created_by: gem-team/gem-planner
+status: pending_approval
+research_confidence: high
+
+tldr: |
+  11 atomic tasks in 5 waves deliver a working local voice→LLM pipeline:
+    Wave 1 (task-001)                    – repo skeleton (monorepo layout, Makefile, env.example, .gitignore)
+    Wave 2 (task-002, task-006)          – backend and frontend scaffolds in parallel
+    Wave 3 (task-003, task-004, task-007)– backend services (Whisper + LM client) and frontend state machine, in parallel
+    Wave 4 (task-005, task-008, task-009)– WebSocket endpoint wired to services; UI components; App assembly
+    Wave 5 (task-010, task-011)          – smoke validation + README
+  Key design choices: uv for Python env; Vite proxy eliminates CORS; useReducer state machine;
+  Whisper loaded once via FastAPI lifespan; run_in_executor for sync transcription.
+
+open_questions:
+  - Which Whisper model size should be the default? (plan assumes "base"; change WHISPER_MODEL env var for small/medium)
+  - Is pnpm the preferred JS package manager, or npm/yarn? (plan assumes pnpm; adjust scripts/dev.sh otherwise)
+  - Should AudioContext resampling happen on the frontend (preferred — no librosa dep) or backend?
+    (plan assumes frontend resamples to 16 kHz before sending PCM)
+  - Does the developer already have LM Studio running locally? Validation task pings it but does not start it.
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Whisper model download blocks first run (model not cached on dev machine)
+      likelihood: medium
+      impact: high
+      mitigation: >
+        Document `uv run python -c "import whisper; whisper.load_model('base')"` pre-flight step
+        in README. task-010 smoke test catches this early.
+    - scenario: Browser sends audio at 48 kHz; backend Whisper receives wrong sample rate → garbage transcript
+      likelihood: high
+      impact: high
+      mitigation: >
+        Frontend AudioWorklet resamples to 16 kHz before sending (task-007).
+        Backend config.py documents expected sample rate. task-010 validates with a real audio chunk.
+    - scenario: LM Studio not running or model not loaded when validation runs
+      likelihood: medium
+      impact: medium
+      mitigation: >
+        Backend /healthz endpoint includes optional LM Studio ping (non-fatal); README documents
+        prerequisite. Validation task-010 marks LLM check as advisory, not blocking.
+    - scenario: MediaRecorder MIME type unsupported in target browser (Safari)
+      likelihood: low
+      impact: medium
+      mitigation: >
+        useAudioStream hook negotiates MIME type at runtime with MediaRecorder.isTypeSupported().
+        Falls back gracefully with user-visible error. Documented as known Safari limitation.
+    - scenario: FastAPI WebSocket handler blocks event loop during model.transcribe() call
+      likelihood: high
+      impact: high
+      mitigation: >
+        Transcription always runs inside asyncio.get_event_loop().run_in_executor(None, _run)
+        — enforced in task-003 implementation spec and verified in task-010.
+
+  assumptions:
+    - Developer has Python 3.11+, Node.js 20+, pnpm, uv, and git installed locally.
+    - LM Studio is installed separately and a model is already loaded before running validation.
+    - macOS/Linux dev environment (scripts/dev.sh uses bash; Windows users need WSL or manual steps).
+    - No CI/CD pipeline is in scope for this plan; local dev workflow only.
+    - Audio is captured as PCM Int16 at 16 kHz mono by the frontend AudioWorklet.
+    - Whisper "base" model (~74 M params) is sufficient for dev; env var allows override.
+
+implementation_specification:
+  code_structure: |
+    speak-to-llm/                    ← repo root
+    ├── backend/
+    │   ├── app/
+    │   │   ├── __init__.py
+    │   │   ├── main.py              ← FastAPI app factory + lifespan (Whisper load)
+    │   │   ├── core/
+    │   │   │   ├── __init__.py
+    │   │   │   └── config.py        ← pydantic-settings (env vars)
+    │   │   ├── services/
+    │   │   │   ├── __init__.py
+    │   │   │   ├── transcriber.py   ← Whisper wrapper (async-safe via run_in_executor)
+    │   │   │   └── llm_client.py    ← LM Studio / openai SDK wrapper
+    │   │   └── ws/
+    │   │       ├── __init__.py
+    │   │       └── audio.py         ← WebSocket /ws/audio endpoint + state machine
+    │   ├── tests/
+    │   │   └── test_smoke.py
+    │   └── pyproject.toml
+    ├── frontend/
+    │   ├── src/
+    │   │   ├── main.tsx
+    │   │   ├── App.tsx
+    │   │   ├── store/
+    │   │   │   └── chatReducer.ts   ← useReducer state machine
+    │   │   ├── hooks/
+    │   │   │   ├── useAudioStream.ts  ← MediaRecorder + AudioWorklet, 16 kHz PCM
+    │   │   │   ├── useWebSocket.ts    ← WebSocket lifecycle + message dispatch
+    │   │   │   └── useWaveform.ts     ← AnalyserNode → amplitude array for canvas
+    │   │   ├── components/
+    │   │   │   ├── TopBar.tsx
+    │   │   │   ├── ChatThread.tsx
+    │   │   │   ├── MessageBubble.tsx
+    │   │   │   ├── WaveformBar.tsx
+    │   │   │   ├── BottomBar.tsx
+    │   │   │   ├── MicButton.tsx
+    │   │   │   └── StatusOverlay.tsx
+    │   │   ├── types/
+    │   │   │   └── ws.ts            ← ServerMessage discriminated union
+    │   │   └── styles/
+    │   │       └── index.css        ← cyberpunk CSS custom properties
+    │   ├── index.html
+    │   ├── vite.config.ts           ← ws proxy to :8000
+    │   ├── tailwind.config.ts
+    │   ├── tsconfig.json
+    │   └── package.json
+    ├── scripts/
+    │   └── dev.sh                   ← concurrently starts both services
+    ├── Makefile                     ← make dev / make test / make lint
+    ├── .env.example
+    ├── .gitignore
+    └── README.md
+
+  affected_areas:
+    - Repo root (Makefile, .gitignore, .env.example, README.md, scripts/)
+    - backend/ (full Python service: FastAPI, Whisper, LM Studio client)
+    - frontend/ (full React+Vite app: state machine, hooks, cyberpunk UI components)
+
+  component_details:
+    - component: backend/app/core/config.py
+      responsibility: >
+        Load all runtime config from environment / .env via pydantic-settings.
+        Exposes: WHISPER_MODEL (default "base"), LM_STUDIO_BASE_URL, LM_STUDIO_MODEL,
+        CORS_ORIGINS, HOST, PORT.
+      interfaces:
+        - "settings: Settings = Settings()"
+
+    - component: backend/app/services/transcriber.py
+      responsibility: >
+        Load Whisper model once (stored on app.state.whisper_model).
+        Provide async transcribe(audio_bytes: bytes, sample_rate: int) -> str
+        using run_in_executor to avoid blocking the event loop.
+      interfaces:
+        - "async def transcribe(audio_bytes: bytes, sample_rate: int = 16000) -> str"
+        - "def load_model(model_name: str) -> whisper.Whisper"
+
+    - component: backend/app/services/llm_client.py
+      responsibility: >
+        Thin async wrapper around the openai SDK pointed at LM Studio base URL.
+        Sends transcript as user message, returns assistant text.
+      interfaces:
+        - "async def chat(transcript: str) -> str"
+
+    - component: backend/app/ws/audio.py
+      responsibility: >
+        WebSocket endpoint at /ws/audio. Implements server-side state machine:
+        IDLE → BUFFERING (on "start" event) → TRANSCRIBING (on "stop" event)
+        → LLM_CALLING → IDLE. Sends JSON status, transcript, llm_response frames.
+      interfaces:
+        - "@router.websocket('/ws/audio') async def ws_audio_endpoint(ws, app)"
+
+    - component: frontend/src/store/chatReducer.ts
+      responsibility: >
+        useReducer state machine: Phase (idle | requesting-mic | recording |
+        processing | responding | error) × WsStatus × messages[] × transcript.
+      interfaces:
+        - "type Phase", "type ChatState", "chatReducer(state, action) → ChatState"
+
+    - component: frontend/src/hooks/useAudioStream.ts
+      responsibility: >
+        getUserMedia → AudioContext (16 kHz) → AudioWorkletNode capturing PCM Int16
+        chunks → sends binary frames over WebSocket ref. Sends JSON "start"/"stop"
+        control events.
+      interfaces:
+        - "useAudioStream(wsRef, dispatch): { startRecording, stopRecording, analyserRef }"
+
+    - component: frontend/src/hooks/useWebSocket.ts
+      responsibility: >
+        Manages WebSocket lifecycle (connect/reconnect on 1006/error). Parses
+        incoming JSON frames and dispatches appropriate actions to chatReducer.
+      interfaces:
+        - "useWebSocket(url, dispatch): { wsRef, wsStatus }"
+
+    - component: frontend/src/hooks/useWaveform.ts
+      responsibility: >
+        Reads analyserRef frequency data on requestAnimationFrame and returns
+        amplitude array for WaveformBar canvas rendering.
+      interfaces:
+        - "useWaveform(analyserRef): { amplitudes: Float32Array }"
+
+    - component: frontend/src/components/* (UI layer)
+      responsibility: >
+        Pure-ish presentation components. TopBar (ws status), ChatThread + MessageBubble
+        (message history), WaveformBar (canvas waveform), BottomBar + MicButton (controls),
+        StatusOverlay (transcribing/thinking states). All styled with cyberpunk tokens.
+      interfaces:
+        - Props interfaces only; no internal I/O logic.
+
+  dependencies:
+    - component: backend/app/ws/audio.py
+      relationship: calls transcriber.transcribe() and llm_client.chat() sequentially per utterance
+    - component: backend/app/main.py
+      relationship: registers ws router; lifespan calls transcriber.load_model() and stores on app.state
+    - component: frontend/src/App.tsx
+      relationship: composes useWebSocket + useAudioStream + useWaveform; passes state/dispatch to components
+
+  integration_points:
+    - "WebSocket ws://localhost:5173/ws/audio in dev (Vite proxy → localhost:8000/ws/audio)"
+    - "Vite server.proxy config in frontend/vite.config.ts bridges frontend port 5173 to backend port 8000"
+    - ".env.example documents VITE_WS_URL, VITE_APP_TITLE, LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL"
+    - "scripts/dev.sh runs `uv run uvicorn` and `pnpm dev` concurrently via & wait or npx concurrently"
+    - "Backend /healthz GET endpoint for readiness check (used by smoke test and README instructions)"
+
+# ──────────────────────────────────────────────────────────────────────────────
+tasks:
+# ──────────────────────────────────────────────────────────────────────────────
+
+  - id: task-001
+    title: Bootstrap repo skeleton
+    description: |
+      Create all root-level scaffolding for the monorepo:
+        - .gitignore (Node, Python, venv, .env files, __pycache__, dist, .vite)
+        - .env.example (documents every env var: VITE_WS_URL, VITE_APP_TITLE,
+          LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL, HOST, PORT)
+        - Makefile with targets: dev, test, lint, clean
+        - scripts/dev.sh — starts backend (uv run uvicorn) and frontend (pnpm dev)
+          concurrently; traps SIGINT to kill both
+        - README.md skeleton with sections: Overview, Prerequisites, Quick Start,
+          Architecture, Environment Variables (populated properly in task-011)
+        - Empty frontend/ and backend/ directories with a .gitkeep
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies: []
+    context_files:
+      research_findings_integration: docs/plan/voice-llm-chat-20260310/research_findings_integration-runtime-setup.yaml
+    estimated_effort: small
+    estimated_files: 6
+    estimated_lines: 120
+    focus_area: repo-root
+    verification:
+      - .gitignore, Makefile, .env.example, scripts/dev.sh, README.md all exist at repo root
+      - scripts/dev.sh is executable (chmod +x)
+      - .env.example contains all required variable names
+    acceptance_criteria:
+      - Running `make dev` from repo root starts both services (even if they fail — the wiring exists)
+      - .env.example is the single source of truth for all environment variable names
+    requires_review: false
+    tech_stack:
+      - bash
+      - Makefile
+    test_coverage: null
+    failure_modes:
+      - scenario: dev.sh does not trap Ctrl-C; leaves zombie backend process on port 8000
+        likelihood: medium
+        impact: medium
+        mitigation: Use `trap 'kill 0' SIGINT; ... wait` pattern in dev.sh
+
+  - id: task-002
+    title: Backend — FastAPI project scaffold
+    description: |
+      Initialise the Python backend project under backend/:
+        - uv init / pyproject.toml with dependencies:
+            fastapi, uvicorn[standard], openai-whisper, numpy, openai, pydantic-settings,
+            python-dotenv, pytest, httpx
+        - Package layout: app/__init__.py, app/main.py, app/core/__init__.py,
+          app/core/config.py, app/services/__init__.py, app/ws/__init__.py
+        - app/core/config.py: pydantic-settings Settings class reading
+            WHISPER_MODEL (default "base"), LM_STUDIO_BASE_URL (default "http://localhost:1234/v1"),
+            LM_STUDIO_MODEL (default "local-model"), HOST (default "0.0.0.0"), PORT (default 8000)
+        - app/main.py: FastAPI app with lifespan (loads Whisper model, stores on app.state),
+            CORS middleware (allow origins from settings.CORS_ORIGINS), /healthz GET endpoint
+            returning {"status": "ok", "whisper_model": settings.WHISPER_MODEL}
+        - backend/tests/__init__.py and tests/test_smoke.py skeleton
+        - backend/.env example (copies relevant lines from root .env.example)
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-001
+    context_files:
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+      research_findings_integration: docs/plan/voice-llm-chat-20260310/research_findings_integration-runtime-setup.yaml
+    estimated_effort: small
+    estimated_files: 8
+    estimated_lines: 150
+    focus_area: backend-scaffold
+    verification:
+      - "`cd backend && uv run uvicorn app.main:app --port 8000` starts without import errors"
+      - "GET http://localhost:8000/healthz returns {\"status\": \"ok\"}"
+      - "pyproject.toml lists all required dependencies"
+    acceptance_criteria:
+      - Backend starts, loads Whisper model during lifespan, and serves /healthz successfully
+      - No synchronous model load in request path — lifespan only
+    requires_review: false
+    tech_stack:
+      - Python 3.11+
+      - uv
+      - FastAPI
+      - pydantic-settings
+      - openai-whisper
+    test_coverage: "tests/test_smoke.py: /healthz returns 200"
+    failure_modes:
+      - scenario: openai-whisper install pulls torch which is very large; uv sync times out
+        likelihood: medium
+        impact: medium
+        mitigation: >
+          Document in README that first `uv sync` may take several minutes.
+          Optionally pre-pin torch to CPU-only wheel (--extra-index-url torch CPU) in pyproject.toml.
+      - scenario: Whisper model download (~145 MB for base) blocks lifespan startup
+        likelihood: medium
+        impact: high
+        mitigation: >
+          Add a note in README to pre-download the model:
+          `uv run python -c "import whisper; whisper.load_model('base')"` before first run.
+
+  - id: task-003
+    title: Backend — Whisper transcription service
+    description: |
+      Implement backend/app/services/transcriber.py:
+        - load_model(model_name: str) -> whisper.Whisper
+            Loads Whisper model synchronously (called once in lifespan, not per-request).
+        - async def transcribe(audio_bytes: bytes, sample_rate: int = 16000) -> str
+            Converts bytes to numpy float32 array (Int16 → float32 / 32768.0).
+            Calls whisper.pad_or_trim() to handle short/long clips.
+            Runs model.transcribe(audio_np, fp16=False) in run_in_executor to avoid
+            blocking the async event loop.
+            Returns result["text"].strip().
+        - Edge cases: empty buffer returns "", very short clips handled by pad_or_trim.
+        - Unit test in tests/test_transcriber.py: mock whisper model; assert empty bytes → "".
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-002
+    context_files:
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 60
+    focus_area: backend-transcription
+    verification:
+      - transcriber.py imports cleanly in the FastAPI app context
+      - Unit test: mock model, call transcribe(b""), assert returns ""
+      - run_in_executor pattern present (no direct await on model.transcribe)
+    acceptance_criteria:
+      - transcribe() is awaitable and never blocks the event loop
+      - Empty/short audio handled without raising exceptions
+    requires_review: false
+    tech_stack:
+      - Python
+      - openai-whisper
+      - numpy
+      - asyncio
+    test_coverage: "tests/test_transcriber.py: empty bytes → empty string; mock Whisper call"
+    failure_modes:
+      - scenario: fp16=True on CPU-only machine causes RuntimeError
+        likelihood: medium
+        impact: high
+        mitigation: Always pass fp16=False; document CUDA path as optional env var FP16=true
+
+  - id: task-004
+    title: Backend — LM Studio LLM client
+    description: |
+      Implement backend/app/services/llm_client.py:
+        - Uses the `openai` Python SDK with base_url=settings.LM_STUDIO_BASE_URL
+          and api_key="lm-studio" (LM Studio ignores key value).
+        - async def chat(transcript: str, history: list[dict] | None = None) -> str
+            Builds messages list: optional system prompt + history + user message.
+            Calls client.chat.completions.create() (wrapped in run_in_executor since
+            openai SDK is sync by default unless using AsyncOpenAI).
+            Prefers AsyncOpenAI client to avoid executor overhead.
+            Returns response.choices[0].message.content.strip().
+        - System prompt: "You are a helpful voice assistant. Be concise."
+        - Unit test: mock AsyncOpenAI; assert chat("hello") returns expected string.
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-002
+    context_files:
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 60
+    focus_area: backend-llm-client
+    verification:
+      - llm_client.py imports cleanly; AsyncOpenAI used (no executor overhead)
+      - Unit test mocks AsyncOpenAI and asserts correct message assembly
+      - base_url read from settings (not hardcoded)
+    acceptance_criteria:
+      - chat() is a true async function (uses AsyncOpenAI)
+      - Connection errors raise a typed exception caught by the WebSocket handler
+    requires_review: false
+    tech_stack:
+      - Python
+      - openai (AsyncOpenAI)
+      - pydantic-settings
+    test_coverage: "tests/test_llm_client.py: mocked AsyncOpenAI returns expected text"
+    failure_modes:
+      - scenario: LM Studio not running; openai client raises ConnectError
+        likelihood: medium
+        impact: medium
+        mitigation: Catch httpx.ConnectError in ws/audio.py; send {"event":"error","code":"LLM_UNAVAILABLE"} to client
+
+  - id: task-005
+    title: Backend — WebSocket audio endpoint
+    description: |
+      Implement backend/app/ws/audio.py and register in main.py:
+        - APIRouter with WebSocket route /ws/audio
+        - Per-connection state machine: IDLE → BUFFERING → TRANSCRIBING → LLM_CALLING → IDLE
+        - On JSON "start" event: reset audio_buffer = bytearray(), transition to BUFFERING
+        - On binary frame: append to audio_buffer (only in BUFFERING state)
+        - On JSON "stop" event:
+            1. Send {"event":"status","state":"transcribing"}
+            2. transcript = await transcriber.transcribe(bytes(audio_buffer))
+            3. Send {"event":"transcript","text": transcript}
+            4. Send {"event":"status","state":"thinking"}
+            5. response = await llm_client.chat(transcript)
+            6. Send {"event":"llm_response","text": response}
+            7. Reset buffer, return to IDLE
+        - On disconnect/exception: clean up buffer, log error
+        - Error handling: catch transcription and LLM errors; send {"event":"error",...} to client
+        - Register router in main.py: app.include_router(ws_router)
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-003
+      - task-004
+    context_files:
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 120
+    focus_area: backend-websocket
+    verification:
+      - WebSocket /ws/audio endpoint registered and reachable (ws://localhost:8000/ws/audio)
+      - State machine transitions tested with a mock WebSocket client in pytest
+      - All server→client message types (transcript, llm_response, error, status) emitted correctly
+    acceptance_criteria:
+      - Full pipeline: send "start" + binary PCM frames + "stop" → receive transcript + llm_response
+      - Connection drop at any state does not crash the server process
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - Python
+      - FastAPI WebSocket
+      - asyncio
+    test_coverage: "tests/test_ws_audio.py: mock transcriber+llm_client; assert message sequence"
+    failure_modes:
+      - scenario: Binary frames arrive out-of-order or after "stop" due to network buffering
+        likelihood: low
+        impact: medium
+        mitigation: Ignore binary frames when state is not BUFFERING; log warning
+      - scenario: Transcription takes >30 s; WebSocket client times out
+        likelihood: low
+        impact: medium
+        mitigation: Send status "transcribing" immediately on stop; consider asyncio.wait_for with timeout
+
+  - id: task-006
+    title: Frontend — Vite + React + TypeScript scaffold
+    description: |
+      Bootstrap the React frontend under frontend/:
+        - Scaffold with: pnpm create vite@latest frontend --template react-ts
+        - Install dependencies: tailwindcss@4, @tailwindcss/vite, @fontsource/orbitron,
+          @fontsource/rajdhani
+        - tailwind.config.ts: extend theme with cyberpunk design tokens
+            (neon-cyan #00FFFF, neon-pink #FF00FF, neon-green #39FF14,
+             bg #0a0a0f, surface #12121a, glow box-shadow utilities)
+        - src/styles/index.css: CSS custom properties on :root for all cyberpunk tokens
+        - vite.config.ts: server.proxy /ws → ws://localhost:8000 (ws: true),
+          /api → http://localhost:8000
+        - src/types/ws.ts: ServerMessage discriminated union
+            (transcript | llm_response | error | status events)
+        - tsconfig.json: strict mode, paths alias @/ → src/
+        - Remove Vite boilerplate (App.css, assets/react.svg, counter, etc.)
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-001
+    context_files:
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+      research_findings_integration: docs/plan/voice-llm-chat-20260310/research_findings_integration-runtime-setup.yaml
+    estimated_effort: small
+    estimated_files: 7
+    estimated_lines: 140
+    focus_area: frontend-scaffold
+    verification:
+      - "`cd frontend && pnpm dev` starts on port 5173 with no TypeScript errors"
+      - vite.config.ts contains ws proxy configuration
+      - Cyberpunk CSS tokens visible in browser DevTools :root computed styles
+    acceptance_criteria:
+      - `pnpm build` produces zero TypeScript errors
+      - Tailwind neon-cyan class renders correct color in browser
+    requires_review: false
+    tech_stack:
+      - React 18+
+      - Vite 7
+      - TypeScript
+      - Tailwind CSS 4
+    test_coverage: null
+    failure_modes:
+      - scenario: Tailwind CSS 4 + Vite 7 @tailwindcss/vite plugin has a breaking API vs v3
+        likelihood: medium
+        impact: medium
+        mitigation: Follow Tailwind CSS 4 Vite plugin docs exactly; use @import "tailwindcss" in CSS rather than @tailwind directives
+
+  - id: task-007
+    title: Frontend — state machine and audio/WebSocket hooks
+    description: |
+      Implement the core logic layer under frontend/src/:
+
+      store/chatReducer.ts:
+        - Phase type: 'idle' | 'requesting-mic' | 'recording' | 'processing' | 'responding' | 'error'
+        - ChatState: { phase, wsStatus, transcript, messages: Message[], errorMessage }
+        - chatReducer(state, action) → ChatState handling all phase transitions
+        - Message type: { id, role: 'user'|'assistant', text, timestamp }
+
+      hooks/useWebSocket.ts:
+        - Connects to VITE_WS_URL env var (default ws://localhost:5173/ws/audio)
+        - Reconnects on close codes 1006/1011 with exponential back-off
+        - Parses incoming JSON ServerMessage frames; dispatches chatReducer actions
+        - Returns { wsRef: MutableRefObject<WebSocket|null>, wsStatus }
+
+      hooks/useAudioStream.ts:
+        - getUserMedia({ audio: { sampleRate: 16000, channelCount: 1 } })
+        - Creates AudioContext at 16000 Hz; connects AnalyserNode for waveform
+        - Uses AudioWorkletProcessor (or ScriptProcessorNode fallback) to capture
+          PCM Int16 chunks and send as binary WebSocket frames
+        - startRecording(): sends JSON {"event":"start","sample_rate":16000,"encoding":"pcm_int16"}
+          then begins streaming
+        - stopRecording(): sends JSON {"event":"stop"}, stops MediaRecorder
+        - Returns { startRecording, stopRecording, analyserRef }
+
+      hooks/useWaveform.ts:
+        - Reads AnalyserNode frequency data via requestAnimationFrame loop
+        - Returns { amplitudes: Uint8Array } for canvas rendering in WaveformBar
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-006
+    context_files:
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+    estimated_effort: medium
+    estimated_files: 5
+    estimated_lines: 280
+    focus_area: frontend-logic
+    verification:
+      - chatReducer handles all phase transitions without TypeScript errors
+      - useAudioStream sends binary frames visible in browser DevTools Network tab (WS)
+      - useWebSocket reconnects after backend restart (verify in browser console)
+    acceptance_criteria:
+      - Phase machine covers all 6 states with no unreachable transitions
+      - Audio captured at 16 kHz mono before sending (confirm in backend logs)
+      - WebSocket reconnect works after backend restart without page reload
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - React (useReducer, useRef, useEffect)
+      - TypeScript
+      - Web Audio API (AudioContext, AudioWorklet, AnalyserNode)
+      - WebSocket API
+    test_coverage: null
+    failure_modes:
+      - scenario: AudioWorklet not supported in older browsers; ScriptProcessorNode also deprecated in Chrome
+        likelihood: low
+        impact: medium
+        mitigation: Implement AudioWorklet as primary; ScriptProcessorNode as fallback with deprecation warning in console
+      - scenario: getUserMedia fails (permission denied); app hangs in 'requesting-mic' phase
+        likelihood: medium
+        impact: medium
+        mitigation: Catch NotAllowedError in startRecording; dispatch error action with friendly message
+
+  - id: task-008
+    title: Frontend — cyberpunk UI components
+    description: |
+      Implement all presentation components under frontend/src/components/:
+
+      TopBar.tsx:
+        - App title (VITE_APP_TITLE) in Orbitron font, neon-cyan glow
+        - WebSocket status badge: green "CONNECTED" / yellow "CONNECTING" / red "DISCONNECTED"
+          using CSS glow utilities
+
+      ChatThread.tsx + MessageBubble.tsx:
+        - Scrollable flex column; useEffect auto-scrolls to bottom on new message
+        - User bubbles: right-aligned, neon-cyan border glow
+        - Assistant bubbles: left-aligned, neon-pink border glow
+        - Empty state: centered "Speak to start…" text in muted color
+
+      WaveformBar.tsx:
+        - Canvas element rendering amplitude bars from useWaveform amplitudes
+        - Active only during 'recording' phase; canvas cleared otherwise
+        - Neon-green bars on dark background
+
+      BottomBar.tsx:
+        - Contains MicButton and TranscriptPreview (live transcript text preview)
+        - Sticky at bottom; dark surface background with top border glow
+
+      MicButton.tsx:
+        - Large circular button (64×64 px minimum)
+        - CSS states: idle → neon-cyan; recording → neon-pink pulse animation;
+          processing → spinner animation; disabled during 'processing'/'responding'
+        - Accessible: aria-label changes per phase
+
+      StatusOverlay.tsx:
+        - Semi-transparent full-screen overlay (bg-black/60 backdrop-blur)
+        - Shows "Transcribing…" or "Thinking…" based on phase
+        - Visible only during 'processing' and 'responding' phases
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-007
+    context_files:
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: medium
+    estimated_files: 7
+    estimated_lines: 300
+    focus_area: frontend-ui
+    verification:
+      - All components render without runtime errors in browser
+      - MicButton shows correct visual state for each Phase value
+      - ChatThread auto-scrolls when new messages appended
+      - WaveformBar canvas animates during recording phase
+    acceptance_criteria:
+      - Cyberpunk color tokens used exclusively (no hardcoded hex values in component files)
+      - MicButton is keyboard-accessible (Enter/Space triggers start/stop)
+      - Components compile with zero TypeScript errors
+    requires_review: false
+    tech_stack:
+      - React
+      - TypeScript
+      - Tailwind CSS 4
+      - HTML Canvas API
+    test_coverage: null
+    failure_modes:
+      - scenario: Canvas WaveformBar causes layout jank at 60 fps on low-end machines
+        likelihood: low
+        impact: low
+        mitigation: requestAnimationFrame with cancelAnimationFrame cleanup on unmount; skip render if not recording
+
+  - id: task-009
+    title: Frontend — App.tsx wiring and final integration
+    description: |
+      Wire all hooks and components together in frontend/src/App.tsx:
+        - useReducer(chatReducer, initialState) for ChatState
+        - useWebSocket(wsUrl, dispatch) → { wsRef, wsStatus }
+        - useAudioStream(wsRef, dispatch) → { startRecording, stopRecording, analyserRef }
+        - useWaveform(analyserRef) → { amplitudes }
+        - Render layout: full-viewport flex column
+            TopBar (wsStatus)
+            ChatThread (messages, phase)
+            WaveformBar (amplitudes, phase)
+            BottomBar (startRecording, stopRecording, phase, transcript)
+            StatusOverlay (phase)
+        - Pass only required props to each component (no prop drilling beyond one level)
+        - Handle browser env: if window.isSecureContext is false, show a warning banner
+          (getUserMedia requires HTTPS or localhost)
+        - main.tsx: StrictMode wrap, mount to #root
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-007
+      - task-008
+    context_files:
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 80
+    focus_area: frontend-wiring
+    verification:
+      - Full app renders at localhost:5173 with no console errors
+      - MicButton click triggers getUserMedia prompt in browser
+      - WebSocket connection status badge updates correctly
+    acceptance_criteria:
+      - Complete render path from App.tsx down to leaf components with no TypeScript errors
+      - `pnpm build` succeeds with zero errors; bundle size reasonable (< 2 MB)
+    requires_review: false
+    tech_stack:
+      - React
+      - TypeScript
+    test_coverage: null
+    failure_modes:
+      - scenario: StrictMode double-invokes useEffect; WebSocket opened twice, causes duplicate connections
+        likelihood: medium
+        impact: medium
+        mitigation: useWebSocket cleanup function closes socket in useEffect return; idempotent connect logic
+
+  - id: task-010
+    title: Smoke validation of full local pipeline
+    description: |
+      Validate the end-to-end voice pipeline works locally:
+
+      Backend checks (pytest + manual):
+        1. GET /healthz → 200 OK, {"status":"ok","whisper_model":"base"}
+        2. pytest tests/test_smoke.py — imports app, checks /healthz, asserts no errors
+        3. pytest tests/test_ws_audio.py — mock WS client sends start+PCM+stop,
+           asserts transcript and llm_response frames received in correct order
+        4. LM Studio ping (advisory): GET LM_STUDIO_BASE_URL/models → log result, not fail
+
+      Frontend checks (manual browser):
+        5. pnpm dev starts, no console errors on page load
+        6. MicButton click → browser mic permission prompt appears
+        7. After granting permission: WaveformBar animates, recording phase active
+        8. On stop: StatusOverlay shows "Transcribing…" then "Thinking…"
+        9. Assistant response appears in ChatThread as neon-pink bubble
+
+      Fix any integration issues discovered (sample rate mismatch, CORS, WebSocket URL).
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-005
+      - task-009
+    context_files:
+      research_findings_integration: docs/plan/voice-llm-chat-20260310/research_findings_integration-runtime-setup.yaml
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 100
+    focus_area: integration-validation
+    verification:
+      - All pytest tests pass (except advisory LM Studio ping)
+      - Full voice→transcript→response cycle completes in browser without errors
+    acceptance_criteria:
+      - pytest exits 0 for all non-advisory tests
+      - Browser console shows zero errors during a complete recording cycle
+      - Transcript appears in ChatThread within 5 s of pressing stop (on base model, CPU)
+    requires_review: true
+    review_depth: lightweight
+    security_sensitive: false
+    tech_stack:
+      - pytest
+      - httpx (async test client)
+      - browser (manual)
+    test_coverage: "Full smoke suite: healthz, ws pipeline mock, frontend manual checklist"
+    failure_modes:
+      - scenario: Audio arrives at 48 kHz to Whisper → poor/empty transcript
+        likelihood: high
+        impact: high
+        mitigation: >
+          Log received buffer length in ws/audio.py; add assert in test that sample_rate
+          in "start" event equals 16000. Fix in useAudioStream if mismatch found.
+      - scenario: CORS error when frontend hits /api directly (non-proxied request)
+        likelihood: low
+        impact: low
+        mitigation: Verify all frontend requests go through Vite proxy; add CORS_ORIGINS to backend config as fallback
+
+  - id: task-011
+    title: README and developer documentation
+    description: |
+      Complete README.md with everything a new developer needs to run the app locally:
+
+      Sections:
+        ## Overview — one-paragraph description + architecture diagram (ASCII)
+        ## Prerequisites — Python 3.11+, uv, Node.js 20+, pnpm, LM Studio, git
+        ## Quick Start
+            git clone ...
+            cp .env.example .env  (edit LM_STUDIO_BASE_URL and LM_STUDIO_MODEL)
+            # Pre-download Whisper model (first time only)
+            cd backend && uv sync && uv run python -c "import whisper; whisper.load_model('base')"
+            # Terminal 1: backend
+            make dev-backend   (or: cd backend && uv run uvicorn app.main:app --reload)
+            # Terminal 2: frontend
+            make dev-frontend  (or: cd frontend && pnpm dev)
+            # Or both at once:
+            make dev
+        ## Environment Variables — table of all vars from .env.example with descriptions
+        ## Architecture — WebSocket flow diagram (ASCII), component tree
+        ## Whisper Model Selection — tradeoff table (tiny/base/small/medium)
+        ## Troubleshooting — common issues: port conflict, mic permission, LM Studio offline,
+            Whisper model not downloaded, sample rate mismatch
+        ## Known Limitations — Safari MediaRecorder, CPU transcription latency
+    agent: gem-team/gem-documentation-writer
+    priority: medium
+    status: done
+    dependencies:
+      - task-010
+    context_files:
+      research_findings_integration: docs/plan/voice-llm-chat-20260310/research_findings_integration-runtime-setup.yaml
+      research_findings_backend: docs/plan/voice-llm-chat-20260310/research_findings_backend-audio-pipeline.yaml
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 150
+    focus_area: documentation
+    verification:
+      - README.md Quick Start section produces a running app when followed on a fresh clone
+      - All env vars in .env.example are documented in the README table
+      - Troubleshooting section addresses all failure_modes from pre_mortem
+    acceptance_criteria:
+      - README is self-contained; no external wiki page needed for local setup
+      - Whisper model pre-download step is clearly called out before `make dev`
+    requires_review: false
+    audience: developers
+    coverage_matrix:
+      - Quick start setup flow
+      - Environment variable reference
+      - Architecture overview (ASCII diagrams)
+      - Whisper model size tradeoffs
+      - Troubleshooting guide

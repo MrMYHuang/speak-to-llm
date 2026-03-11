@@ -1,0 +1,488 @@
+plan_id: voice-llm-chat-20260310
+objective: Build a fullstack voice-first LLM chat app — Python backend that receives
+  streamed microphone audio over WebSocket, transcribes with Whisper, calls LM Studio,
+  and returns results to the frontend.
+focus_area: backend-audio-pipeline
+created_at: "2026-03-10"
+created_by: researcher-agent
+status: completed
+
+tldr: |
+  - FastAPI + uvicorn is the canonical Python choice for async WebSocket audio handling; uv manages the venv and pyproject.toml.
+  - WebSocket protocol uses binary frames for raw PCM audio chunks plus JSON control messages (start/stop/error/result) on the same connection.
+  - Whisper requires 16 kHz mono float32 PCM; browser MediaRecorder typically yields Int16 PCM which must be resampled/cast before transcription.
+  - LM Studio exposes an OpenAI-compatible REST API (default http://localhost:1234/v1); the standard `openai` Python SDK works unchanged with a custom base_url.
+  - Key risks: Whisper model load time (~2–5 s, do once at startup), GIL blocking during transcription (use run_in_executor), and browser audio format mismatch.
+
+research_metadata:
+  methodology: >
+    Web research via targeted queries on (1) openai-whisper Python raw-buffer transcription,
+    (2) FastAPI+WebSocket+uv project structure, (3) LM Studio OpenAI-compatible API Python integration,
+    (4) asyncio WebSocket VAD / end-of-speech detection. Sources cross-referenced for accuracy.
+  tools_used:
+    - web_search
+    - bash (directory scaffolding, prompts.md read)
+  scope: >
+    Backend Python service only — WebSocket server, audio buffering, Whisper transcription,
+    LM Studio HTTP client. Frontend and deployment infrastructure excluded.
+  confidence: high
+  coverage: 90
+
+# ─────────────────────────────────────────────
+# 1. RECOMMENDED PYTHON APP STRUCTURE
+# ─────────────────────────────────────────────
+recommended_project_structure:
+  root_layout: |
+    speak-to-llm/
+    ├── backend/
+    │   ├── app/
+    │   │   ├── __init__.py
+    │   │   ├── main.py              # FastAPI app factory, lifespan (model load)
+    │   │   ├── ws/
+    │   │   │   ├── __init__.py
+    │   │   │   └── audio.py         # WebSocket endpoint /ws/audio
+    │   │   ├── services/
+    │   │   │   ├── __init__.py
+    │   │   │   ├── transcriber.py   # Whisper wrapper, async-safe
+    │   │   │   └── llm_client.py    # LM Studio / OpenAI client wrapper
+    │   │   └── core/
+    │   │       ├── __init__.py
+    │   │       └── config.py        # Pydantic Settings (env vars)
+    │   ├── pyproject.toml           # uv project file
+    │   └── tests/
+    ├── frontend/                    # React/Vite app (separate)
+    └── docs/
+        └── plan/
+  notes:
+    - "main.py uses FastAPI lifespan to load Whisper model once at startup and store on app.state."
+    - "config.py reads LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL from env/.env."
+    - "WebSocket router is an APIRouter registered in main.py."
+    - "Run: uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000"
+
+# ─────────────────────────────────────────────
+# 2. WEBSOCKET PROTOCOL
+# ─────────────────────────────────────────────
+websocket_protocol:
+  endpoint: ws://localhost:8000/ws/audio
+  framing_strategy: >
+    Binary frames carry raw PCM audio chunks.
+    Text frames carry JSON control/result messages.
+    This avoids base64 overhead while keeping signalling human-readable.
+
+  client_to_server_messages:
+    - type: binary
+      description: Raw audio chunk (Int16 PCM, 16 kHz, mono, little-endian)
+      notes: "Browser sends chunks as ArrayBuffer from AudioWorkletProcessor or ScriptProcessorNode."
+
+    - type: json_text
+      event: start
+      schema: '{"event": "start", "sample_rate": 16000, "encoding": "pcm_int16"}'
+      description: >
+        Sent before first audio chunk. Backend uses sample_rate/encoding metadata
+        to configure the buffer. Optional but enables future multi-format support.
+
+    - type: json_text
+      event: stop
+      schema: '{"event": "stop"}'
+      description: >
+        Signals end-of-utterance. Backend flushes buffer, runs Whisper, calls LLM,
+        and returns result. Frontend sends this on silence detection or button release.
+
+  server_to_client_messages:
+    - event: transcript
+      schema: '{"event": "transcript", "text": "...", "duration_ms": 1240}'
+      description: Whisper transcription result, sent after stop is processed.
+
+    - event: llm_response
+      schema: '{"event": "llm_response", "text": "...", "model": "..."}'
+      description: LLM reply from LM Studio, sent after transcript.
+
+    - event: error
+      schema: '{"event": "error", "code": "TRANSCRIPTION_FAILED", "message": "..."}'
+      description: Any pipeline error; client should display and re-enable mic.
+
+    - event: status
+      schema: '{"event": "status", "state": "transcribing"|"thinking"|"idle"}'
+      description: Optional progress indicators for UI feedback.
+
+  server_side_state_machine: |
+    IDLE → (start received) → BUFFERING
+    BUFFERING → (binary chunks) → BUFFERING  [append to buffer]
+    BUFFERING → (stop received) → TRANSCRIBING  [asyncio.get_event_loop().run_in_executor]
+    TRANSCRIBING → (done) → LLM_CALLING
+    LLM_CALLING → (done) → IDLE  [send results, clear buffer]
+    any state → (disconnect/error) → IDLE  [cleanup]
+
+  alternative_eos_detection:
+    description: >
+      If frontend cannot reliably send stop events, server-side VAD can be used.
+      py-webrtcvad processes 10/20/30 ms frames; 0.5 s consecutive silence triggers EOS.
+    library: py-webrtcvad
+    frame_config: "30 ms frames @ 16 kHz = 960 samples = 1920 bytes (Int16)"
+    aggressiveness: 2  # 0-3; 2 balances sensitivity vs false positives
+
+# ─────────────────────────────────────────────
+# 3. AUDIO BUFFERING AND TRANSCRIPTION FLOW
+# ─────────────────────────────────────────────
+audio_buffering_and_transcription:
+  buffer_design:
+    type: bytearray or list[bytes]
+    scope: per-WebSocket connection (connection-local variable, not global)
+    init: "audio_buffer: bytearray = bytearray()"
+    append: "audio_buffer.extend(chunk)"
+    clear_after: transcription complete
+
+  audio_format_requirements:
+    whisper_native: "float32 numpy array, mono, 16000 Hz, values in [-1.0, 1.0]"
+    browser_output: "Int16 PCM (16-bit signed, little-endian), often at 44100 or 48000 Hz"
+    conversion_steps:
+      1_reinterpret: "np.frombuffer(audio_buffer, dtype=np.int16)"
+      2_normalize: ".astype(np.float32) / 32768.0"
+      3_resample_if_needed: >
+        If browser sends at 48000 Hz, downsample to 16000 Hz.
+        Use librosa.resample() or scipy.signal.resample_poly(audio, 16000, 48000).
+        Alternatively configure AudioContext.createScriptProcessor with sampleRate:16000
+        or use OfflineAudioContext for resampling on the frontend — preferred to avoid
+        server-side librosa dependency.
+
+  transcription_code_pattern: |
+    import asyncio
+    import numpy as np
+    import whisper
+
+    # At startup (lifespan):
+    model = whisper.load_model("base")   # "small", "medium" for better accuracy
+
+    # In WebSocket handler:
+    async def transcribe(audio_buffer: bytes) -> str:
+        loop = asyncio.get_event_loop()
+        def _run():
+            audio_np = np.frombuffer(audio_buffer, dtype=np.int16).astype(np.float32) / 32768.0
+            # Optional: pad_or_trim ensures exactly 30 s input window
+            # audio_np = whisper.pad_or_trim(audio_np)
+            result = model.transcribe(audio_np, fp16=False)
+            return result["text"].strip()
+        return await loop.run_in_executor(None, _run)
+
+  transcription_notes:
+    - "run_in_executor is mandatory — model.transcribe() is synchronous and CPU/GPU-bound; calling it directly in an async handler blocks the event loop."
+    - "fp16=False required on CPU-only machines; set fp16=True if CUDA available."
+    - "whisper.pad_or_trim optional but prevents issues with very short (<0.1 s) or very long (>30 s) utterances."
+    - "Model load takes 1–5 s; must happen once at app startup via FastAPI lifespan, not per-request."
+    - "For multi-language support add language='en' or let Whisper auto-detect."
+
+  model_size_tradeoffs:
+    tiny:   {params: "39M",  speed: "fastest",  wer: "highest",  vram: "~1 GB"}
+    base:   {params: "74M",  speed: "fast",     wer: "good",     vram: "~1 GB"}
+    small:  {params: "244M", speed: "moderate", wer: "better",   vram: "~2 GB"}
+    medium: {params: "769M", speed: "slow",     wer: "best OSS", vram: "~5 GB"}
+  recommended_default: base  # balances speed and accuracy for dev; small for production
+
+# ─────────────────────────────────────────────
+# 4. LM STUDIO INTEGRATION PATTERN
+# ─────────────────────────────────────────────
+lm_studio_integration:
+  server_defaults:
+    base_url: "http://localhost:1234/v1"
+    api_key: "lm-studio"  # required by SDK, value is arbitrary unless auth configured
+    default_port: 1234
+    endpoints_used:
+      - "GET  /v1/models              → list available models"
+      - "POST /v1/chat/completions    → generate response"
+
+  python_client_pattern: |
+    from openai import AsyncOpenAI
+
+    # Instantiated once at app startup (app.state.llm_client)
+    llm_client = AsyncOpenAI(
+        base_url="http://localhost:1234/v1",
+        api_key="lm-studio",
+    )
+
+    async def call_llm(transcript: str, model: str) -> str:
+        response = await llm_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful voice assistant. Reply concisely."},
+                {"role": "user",   "content": transcript},
+            ],
+            temperature=0.7,
+            max_tokens=512,
+            stream=False,   # set True for token-by-token streaming to frontend
+        )
+        return response.choices[0].message.content
+
+  streaming_variant: |
+    # For streaming LLM tokens back over the same WebSocket:
+    async with llm_client.chat.completions.stream(
+        model=model,
+        messages=[...],
+    ) as stream:
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if delta:
+                await websocket.send_text(
+                    json.dumps({"event": "llm_token", "token": delta})
+                )
+
+  configuration_via_env:
+    env_vars:
+      LM_STUDIO_BASE_URL: "http://localhost:1234/v1"
+      LM_STUDIO_MODEL: "lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF"
+      LM_STUDIO_API_KEY: "lm-studio"
+    note: >
+      Model identifier must exactly match the name shown in LM Studio's loaded-models list.
+      Retrieve at runtime with GET /v1/models if dynamic selection is needed.
+
+  lm_studio_setup_checklist:
+    - "Download and install LM Studio from lmstudio.ai"
+    - "Download a GGUF model (e.g. Llama-3-8B-Instruct)"
+    - "Start Local Server in LM Studio UI (or lms server start via CLI)"
+    - "Verify: curl http://localhost:1234/v1/models"
+    - "Note exact model identifier for LM_STUDIO_MODEL env var"
+
+# ─────────────────────────────────────────────
+# 5. DEPENDENCIES AND RUNTIME CONSIDERATIONS
+# ─────────────────────────────────────────────
+dependencies:
+  pyproject_toml_dependencies:
+    - name: fastapi
+      version: ">=0.111"
+      purpose: "Async web framework, WebSocket support"
+    - name: uvicorn
+      version: ">=0.30"
+      purpose: "ASGI server"
+    - name: openai-whisper
+      version: ">=20231117"
+      purpose: "Local Whisper transcription"
+    - name: openai
+      version: ">=1.30"
+      purpose: "OpenAI SDK used as LM Studio HTTP client"
+    - name: numpy
+      version: ">=1.24"
+      purpose: "Audio array manipulation for Whisper"
+    - name: torch
+      version: ">=2.0"
+      purpose: "Whisper runtime dependency (CPU or CUDA)"
+    - name: python-dotenv
+      version: ">=1.0"
+      purpose: "Load .env for config"
+    - name: websockets
+      version: ">=12.0"
+      purpose: "Transitive FastAPI dep; explicit for ws utilities"
+  optional_dependencies:
+    - name: py-webrtcvad
+      purpose: "Server-side VAD / end-of-speech detection (only if frontend cannot send stop events)"
+    - name: librosa
+      purpose: "Audio resampling (avoid if resampling is done on frontend)"
+    - name: scipy
+      purpose: "Lightweight alternative to librosa for resampling"
+
+  uv_commands: |
+    # Bootstrap
+    cd backend
+    uv init --app
+    uv add fastapi uvicorn openai-whisper openai numpy python-dotenv websockets
+
+    # Run
+    uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+  runtime_risks:
+    - risk: "Whisper model load blocks startup"
+      severity: medium
+      mitigation: "Use FastAPI lifespan context manager; load model before first request."
+
+    - risk: "model.transcribe() blocks asyncio event loop"
+      severity: high
+      mitigation: "Wrap in asyncio.get_event_loop().run_in_executor(None, ...) — mandatory."
+
+    - risk: "Browser audio sample rate mismatch (48 kHz vs Whisper's 16 kHz)"
+      severity: high
+      mitigation: "Resample on frontend via OfflineAudioContext (preferred) or backend via scipy/librosa."
+
+    - risk: "Large audio buffer memory for long utterances"
+      severity: low
+      mitigation: "Cap buffer at ~30 s; warn client and auto-trigger stop if exceeded."
+
+    - risk: "LM Studio not running / model not loaded"
+      severity: medium
+      mitigation: "Catch openai.APIConnectionError; send error event to client with actionable message."
+
+    - risk: "PyTorch + openai-whisper install size (~2 GB with CUDA)"
+      severity: low
+      mitigation: "Use CPU-only torch: uv add torch --extra-index-url https://download.pytorch.org/whl/cpu"
+
+    - risk: "CORS for frontend dev server (localhost:5173)"
+      severity: low
+      mitigation: "Add fastapi.middleware.cors.CORSMiddleware with allow_origins=[\"http://localhost:5173\"]"
+
+    - risk: "WebSocket connection drops mid-utterance"
+      severity: medium
+      mitigation: "Discard partial buffer on disconnect; log session ID for debugging."
+
+# ─────────────────────────────────────────────
+# FILES ANALYZED (N/A — new project)
+# ─────────────────────────────────────────────
+files_analyzed:
+  - file: prompts.md
+    path: /Users/myh/Documents/speak-to-llm/prompts.md
+    purpose: "Project specification — defines tech stack, frontend/backend split, and LLM integration target."
+    key_elements:
+      - element: "Tech stack declaration"
+        type: "specification"
+        location: "prompts.md:1"
+        description: "Python + uv + transformers + openai-whisper for backend; React + Vite + TypeScript for frontend."
+    language: markdown
+    lines: 9
+
+# ─────────────────────────────────────────────
+# PATTERNS FOUND (from research, not existing code)
+# ─────────────────────────────────────────────
+patterns_found:
+  - category: architecture
+    pattern: "Separation of transport (WebSocket router) from processing (services)"
+    description: >
+      WebSocket handler owns only connection lifecycle and state-machine transitions.
+      Transcription and LLM calls are delegated to service modules (transcriber.py, llm_client.py).
+    examples:
+      - file: "app/ws/audio.py"
+        location: "ws/audio.py:websocket_audio"
+        snippet: |
+          transcript = await transcriber.transcribe(audio_buffer)
+          reply = await llm_client.call(transcript)
+          await websocket.send_text(json.dumps({"event": "llm_response", "text": reply}))
+    prevalence: common
+
+  - category: structure
+    pattern: "App-state singleton for expensive resources"
+    description: >
+      Whisper model and OpenAI client instantiated once in lifespan, stored on app.state,
+      injected into handlers via FastAPI dependencies.
+    examples:
+      - file: "app/main.py"
+        location: "main.py:lifespan"
+        snippet: |
+          @asynccontextmanager
+          async def lifespan(app: FastAPI):
+              app.state.whisper = whisper.load_model("base")
+              app.state.llm = AsyncOpenAI(base_url=settings.LM_STUDIO_BASE_URL, api_key="lm-studio")
+              yield
+    prevalence: common
+
+  - category: error_handling
+    pattern: "Pipeline errors serialized to WebSocket error events"
+    description: >
+      try/except around transcription and LLM call; errors sent as JSON {"event":"error",...}
+      rather than closing the WebSocket, allowing frontend to recover gracefully.
+    examples:
+      - file: "app/ws/audio.py"
+        location: "ws/audio.py:handle_stop"
+        snippet: |
+          except Exception as exc:
+              await ws.send_text(json.dumps({"event": "error", "code": "PIPELINE_ERROR", "message": str(exc)}))
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: "FastAPI WebSocket router"
+      responsibility: "Accept WS connection, demux binary/text frames, maintain per-connection state machine"
+      location: "backend/app/ws/audio.py"
+      relationship_to_domain: "Entry point for all audio data"
+    - component: "Whisper transcription service"
+      responsibility: "Convert PCM numpy array to text, async-safe via executor"
+      location: "backend/app/services/transcriber.py"
+      relationship_to_domain: "Consumes audio buffer, produces transcript string"
+    - component: "LLM client service"
+      responsibility: "POST to LM Studio /v1/chat/completions, return response text"
+      location: "backend/app/services/llm_client.py"
+      relationship_to_domain: "Consumes transcript, produces LLM reply"
+    - component: "Settings / config"
+      responsibility: "Read env vars: WHISPER_MODEL, LM_STUDIO_BASE_URL, LM_STUDIO_MODEL"
+      location: "backend/app/core/config.py"
+      relationship_to_domain: "Configures both service modules"
+  data_flow_involving_domain: |
+    Browser AudioWorklet → [binary PCM chunks over WS] → audio_buffer bytearray
+    → (on stop event) → np.frombuffer + resample → whisper.model.transcribe (executor)
+    → transcript text → AsyncOpenAI.chat.completions.create → reply text
+    → JSON {"event":"llm_response"} → WebSocket → Frontend
+  key_relationships_to_domain:
+    - from: "ws/audio.py"
+      to: "services/transcriber.py"
+      relationship: calls
+    - from: "ws/audio.py"
+      to: "services/llm_client.py"
+      relationship: calls
+    - from: "services/transcriber.py"
+      to: "openai-whisper (torch)"
+      relationship: imports
+    - from: "services/llm_client.py"
+      to: "openai SDK → LM Studio HTTP"
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python 3.11+
+  frameworks_used_in_domain:
+    - name: FastAPI
+      usage_in_domain: "ASGI app, WebSocket endpoint, dependency injection, lifespan"
+    - name: uvicorn
+      usage_in_domain: "ASGI server runner"
+  libraries_used_in_domain:
+    - name: openai-whisper
+      purpose_in_domain: "Local speech-to-text transcription"
+    - name: torch
+      purpose_in_domain: "Whisper model inference runtime"
+    - name: numpy
+      purpose_in_domain: "PCM byte buffer to float32 array conversion"
+    - name: openai (Python SDK)
+      purpose_in_domain: "HTTP client for LM Studio /v1/chat/completions"
+    - name: python-dotenv / pydantic-settings
+      purpose_in_domain: "Environment-based configuration"
+  external_apis_used_in_domain:
+    - name: LM Studio Local Server
+      integration_point: "POST http://localhost:1234/v1/chat/completions via openai SDK"
+
+related_conventions:
+  naming_patterns_in_domain: "snake_case modules, descriptive service names (transcriber, llm_client)"
+  structure_of_domain: "Router → Service layer → External dependency; no business logic in router"
+  error_handling_in_domain: "Catch at service call site in WS handler; serialize to JSON error event; never raise unhandled to ASGI"
+  testing_in_domain: "pytest + pytest-asyncio; mock whisper model and openai client for unit tests"
+  documentation_in_domain: "Docstrings on service functions; OpenAPI auto-docs via FastAPI at /docs"
+
+open_questions:
+  - question: "Should LLM streaming (token-by-token) be used or full-response-at-once?"
+    context: >
+      Streaming reduces perceived latency but requires the frontend to handle incremental
+      llm_token events and reassemble the display. Full-response is simpler to implement.
+
+  - question: "Should conversation history be maintained across utterances?"
+    context: >
+      Stateless (single-turn) is simpler; multi-turn requires storing message history per
+      WebSocket session and trimming to stay within the model's context window.
+
+  - question: "Where should audio resampling happen — frontend or backend?"
+    context: >
+      Frontend resampling via OfflineAudioContext avoids server dependencies (librosa/scipy)
+      and reduces bandwidth (16 kHz vs 48 kHz = 3× less data), but adds frontend complexity.
+
+  - question: "Is py-webrtcvad needed or will frontend always send explicit stop events?"
+    context: >
+      Push-to-talk (button) = frontend sends stop, no VAD needed.
+      Automatic silence detection = either frontend or backend VAD required.
+
+gaps:
+  - area: "Frontend audio encoding details"
+    description: "Exact MediaRecorder/AudioWorklet output format depends on browser implementation; needs frontend spike."
+    impact: "May require adjusting backend PCM conversion (endianness, channel count, sample rate)."
+
+  - area: "Whisper GPU availability"
+    description: "Performance with CPU-only Whisper on developer machines not benchmarked."
+    impact: "On CPU, base model takes ~3–8 s per utterance; may feel slow. fp16 must be False on CPU."
+
+  - area: "LM Studio model identifier format"
+    description: "Exact model name string format varies by downloaded model; not tested."
+    impact: "Wrong model ID causes 404 from LM Studio; needs runtime GET /v1/models call or clear config docs."
+
+  - area: "Authentication / security"
+    description: "No auth between browser and backend WebSocket defined."
+    impact: "Acceptable for local dev; production requires token-based auth or origin validation."

@@ -1,0 +1,50 @@
+# ── Environment ──────────────────────────────
+.env
+.env.local
+.env.*.local
+frontend/.env.local
+
+# ── Node / pnpm ───────────────────────────────
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# ── Python / uv ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+backend/.venv/
+.venv/
+*.egg-info/
+dist/
+build/
+*.so
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Models / large files ──────────────────────
+*.bin
+*.pt
+*.onnx
+*.gguf
+models/
+
+# ── Editor / OS ───────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ─────────────────────────────────────
+*.log
+logs/

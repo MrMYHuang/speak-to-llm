@@ -1,0 +1,577 @@
+plan_id: voice-llm-chat-20260310
+objective: >
+  Build a fullstack voice-first LLM chat app with React/Vite frontend and Python
+  backend. Establish a good local-dev workflow, environment variables, startup
+  instructions, and cross-service integration assumptions.
+focus_area: integration-runtime-setup
+created_at: "2026-03-10"
+created_by: gem-team/gem-researcher
+status: completed
+
+tldr: |
+  - Flat monorepo layout: frontend/ (Vite 7 + React + TS) and backend/ (Python + uv + FastAPI)
+    co-exist at repo root alongside docs/ and shared config files.
+  - WebSocket audio streaming is the primary IPC channel; Vite dev-server proxy
+    (ws: true) eliminates CORS friction in local development.
+  - Environment variables split cleanly: VITE_* prefixed vars for the browser bundle,
+    python-dotenv / pydantic-settings for the backend; a single root .env.example
+    documents every knob.
+  - Local dev runs two processes: `uv run uvicorn` (backend, port 8000) and
+    `pnpm dev` (frontend, port 5173); a root Makefile or scripts/dev.sh wires both.
+  - Validation path: (1) backend /healthz HTTP check, (2) WebSocket echo probe,
+    (3) Whisper model smoke-load, (4) LM Studio connectivity ping before first chat.
+
+research_metadata:
+  methodology: >
+    Examined prompts.md for project intent; performed two rounds of targeted web
+    searches covering (a) Vite 7 + Python uv monorepo layouts and WebSocket proxy
+    patterns, and (b) uv / pyproject.toml / FastAPI / openai-whisper project
+    structures and env-var conventions. Synthesised findings into implementation
+    recommendations.
+  tools_used:
+    - view (prompts.md)
+    - web_search (monorepo layout, Vite proxy, uv / FastAPI structure)
+  scope: >
+    Integration layer only: repo structure, environment variables, process model,
+    dev-startup commands, and scaffold validation. Does not cover UI component
+    internals, Whisper model selection, or LM Studio model loading.
+  confidence: high
+  coverage: 90  # all integration-layer concerns addressed; no existing code to survey
+
+# ──────────────────────────────────────────────
+# 1. REPO LAYOUT
+# ──────────────────────────────────────────────
+files_analyzed:
+  - file: prompts.md
+    path: prompts.md
+    purpose: >
+      Seed requirements: voice → WebSocket → Whisper → LM Studio pipeline;
+      React/Vite 7/TS frontend, Python/uv/whisper backend.
+    key_elements:
+      - element: tech stack declaration
+        type: pattern
+        location: "prompts.md:5-8"
+        description: >
+          Frontend: React, Vite 7, TypeScript, cyberpunk UI.
+          Backend: Python, uv, transformers, openai-whisper.
+          LLM target: LM Studio (OpenAI-compatible REST endpoint).
+    language: markdown
+    lines: 10
+
+patterns_found:
+  - category: structure
+    pattern: flat-monorepo-with-sibling-apps
+    description: >
+      Both frontend/ and backend/ live at the repo root as peer directories.
+      No heavyweight monorepo tooling (Turborepo, NX) is needed for a two-service
+      project; a root Makefile and/or scripts/ directory is sufficient.
+    examples:
+      - file: recommended layout (not yet created)
+        location: "/"
+        snippet: |
+          speak-to-llm/
+          ├── frontend/          # Vite 7 + React + TypeScript
+          │   ├── src/
+          │   │   ├── components/
+          │   │   ├── hooks/          # useVoiceWebSocket, useAudioCapture
+          │   │   ├── pages/
+          │   │   └── main.tsx
+          │   ├── public/
+          │   ├── index.html
+          │   ├── vite.config.ts
+          │   ├── tsconfig.json
+          │   ├── package.json
+          │   └── .env.local         # frontend env overrides (gitignored)
+          ├── backend/           # FastAPI + uv + Whisper
+          │   ├── app/
+          │   │   ├── main.py
+          │   │   ├── api/
+          │   │   │   └── ws_audio.py     # WebSocket /ws/audio endpoint
+          │   │   ├── services/
+          │   │   │   ├── whisper_service.py
+          │   │   │   └── llm_client.py   # LM Studio OpenAI-compat client
+          │   │   └── core/
+          │   │       └── config.py       # pydantic-settings
+          │   ├── tests/
+          │   ├── pyproject.toml
+          │   ├── uv.lock
+          │   └── .env                    # backend env (gitignored)
+          ├── docs/
+          │   └── plan/
+          │       └── voice-llm-chat-20260310/
+          ├── scripts/
+          │   └── dev.sh             # starts both services concurrently
+          ├── Makefile               # `make dev`, `make test`, `make lint`
+          ├── .env.example           # canonical list of all env vars
+          ├── .gitignore
+          └── README.md
+    prevalence: common
+
+  - category: architecture
+    pattern: vite-ws-proxy-to-backend
+    description: >
+      Vite dev server proxies /ws/* to the Python backend (ws: true).
+      This means the React app uses a relative path (ws://localhost:5173/ws/audio)
+      in development, matching the production pattern where a reverse proxy
+      (nginx/caddy) does the same routing. No CORS configuration needed.
+    examples:
+      - file: frontend/vite.config.ts
+        location: "frontend/vite.config.ts"
+        snippet: |
+          import { defineConfig } from 'vite'
+          import react from '@vitejs/plugin-react'
+
+          export default defineConfig({
+            plugins: [react()],
+            server: {
+              port: 5173,
+              proxy: {
+                '/ws': {
+                  target: 'ws://localhost:8000',
+                  ws: true,
+                  changeOrigin: true,
+                },
+                '/api': {
+                  target: 'http://localhost:8000',
+                  changeOrigin: true,
+                },
+              },
+            },
+          })
+    prevalence: common
+
+  - category: naming
+    pattern: VITE_-prefix-for-browser-vars
+    description: >
+      Only variables prefixed VITE_ are bundled into the browser build via
+      import.meta.env. All other env vars (API keys, model paths) stay
+      server-side. This prevents accidental secret leakage.
+    examples:
+      - file: frontend/.env.local
+        location: "frontend/.env.local"
+        snippet: |
+          VITE_WS_URL=ws://localhost:5173/ws/audio
+          VITE_APP_TITLE=SpeakToLLM
+    prevalence: common
+
+# ──────────────────────────────────────────────
+# 2. ENVIRONMENT VARIABLES
+# ──────────────────────────────────────────────
+related_architecture:
+  components_relevant_to_domain:
+    - component: Vite dev server
+      responsibility: >
+        Serves the React SPA with HMR; proxies /ws/* and /api/* to the Python
+        backend so the browser uses a single origin.
+      location: frontend/vite.config.ts
+      relationship_to_domain: domain depends on this for WebSocket proxy
+
+    - component: FastAPI + uvicorn
+      responsibility: >
+        Exposes WebSocket endpoint (/ws/audio) for streaming audio bytes,
+        calls Whisper for transcription, forwards text to LM Studio, and
+        streams the response back over the same socket.
+      location: backend/app/main.py
+      relationship_to_domain: domain depends on this for runtime process
+
+    - component: openai-whisper
+      responsibility: Transcribes raw audio bytes to text inside the backend.
+      location: backend/app/services/whisper_service.py
+      relationship_to_domain: domain depends on this (model load at startup)
+
+    - component: LM Studio (external)
+      responsibility: >
+        Runs locally on a configurable host:port, exposes an OpenAI-compatible
+        /v1/chat/completions REST endpoint. Backend sends chat requests to it.
+      location: external process (user-managed)
+      relationship_to_domain: domain depends on this for LLM inference
+
+  interfaces_used_by_domain:
+    - interface: WebSocket /ws/audio
+      location: backend/app/api/ws_audio.py
+      usage_pattern: >
+        Browser sends binary audio frames while recording; on stop-signal
+        (e.g., a text message "END") the backend flushes, transcribes the
+        accumulated audio, calls LM Studio, and sends back a JSON text response.
+
+    - interface: GET /healthz
+      location: backend/app/main.py
+      usage_pattern: >
+        HTTP endpoint returning {status: "ok", whisper_loaded: bool,
+        lm_studio_reachable: bool}. Used by dev startup validation and CI.
+
+  data_flow_involving_domain: >
+    Browser mic (MediaRecorder, WebM/opus) → WebSocket binary frames →
+    backend accumulates audio buffer → Whisper transcribe → text →
+    LM Studio /v1/chat/completions (HTTP) → response text →
+    WebSocket send_text → React UI renders message.
+
+  key_relationships_to_domain:
+    - from: frontend/src/hooks/useVoiceWebSocket.ts
+      to: backend/app/api/ws_audio.py
+      relationship: WebSocket (ws://)
+    - from: backend/app/services/llm_client.py
+      to: LM Studio process
+      relationship: HTTP POST (OpenAI-compat REST)
+    - from: backend/app/services/whisper_service.py
+      to: openai-whisper library
+      relationship: imports / calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript (frontend)
+    - Python 3.11+ (backend)
+
+  frameworks_used_in_domain:
+    - name: Vite 7
+      usage_in_domain: Frontend build tool, dev server, WebSocket proxy
+    - name: React 18+
+      usage_in_domain: UI component tree, hooks for audio capture and WS
+    - name: FastAPI
+      usage_in_domain: Async HTTP + WebSocket server on Python
+    - name: uvicorn
+      usage_in_domain: ASGI runner for FastAPI, supports WebSocket natively
+
+  libraries_used_in_domain:
+    - name: uv
+      purpose_in_domain: Python package manager and venv manager (replaces pip)
+    - name: openai-whisper
+      purpose_in_domain: Local speech-to-text transcription
+    - name: pydantic-settings
+      purpose_in_domain: Typed env-var loading from .env in the backend
+    - name: python-dotenv
+      purpose_in_domain: .env file loading (peer dep of pydantic-settings)
+    - name: openai (python SDK)
+      purpose_in_domain: >
+        Used with base_url pointing to LM Studio to make OpenAI-compat calls
+    - name: "@vitejs/plugin-react"
+      purpose_in_domain: Vite plugin enabling JSX transform and React Fast Refresh
+
+  external_apis_used_in_domain:
+    - name: LM Studio (local OpenAI-compatible server)
+      integration_point: >
+        backend/app/services/llm_client.py → POST http://{LM_STUDIO_HOST}:{LM_STUDIO_PORT}/v1/chat/completions
+
+related_conventions:
+  naming_patterns_in_domain: >
+    Frontend hooks prefixed with "use" (useVoiceWebSocket, useAudioCapture).
+    Backend service files named <noun>_service.py.
+    Environment variable names are SCREAMING_SNAKE_CASE.
+    VITE_ prefix gates browser exposure.
+
+  structure_of_domain: >
+    Backend: layered (api/ routers → services/ → external calls).
+    Frontend: hooks abstract WS + audio, components are pure UI.
+
+  error_handling_in_domain: >
+    WebSocket disconnects caught with try/except WebSocketDisconnect.
+    LM Studio connection failures surface as HTTP 502 from /api/* or as
+    {error: "lm_studio_unreachable"} JSON over the WebSocket.
+    Whisper load failure logged at startup; /healthz reflects the state.
+
+  testing_in_domain: >
+    Backend: pytest + httpx AsyncClient for HTTP; pytest-asyncio for WS.
+    Frontend: Vitest for hooks/units; no E2E required at scaffold stage.
+
+  documentation_in_domain: >
+    README.md at repo root covers: prerequisites, env setup, dev startup,
+    architecture diagram (ASCII), and troubleshooting common issues
+    (LM Studio port, Whisper model download, mic permissions).
+
+related_dependencies:
+  internal:
+    - component: frontend/vite.config.ts
+      relationship_to_domain: configures dev proxy to backend
+      direction: outbound
+    - component: backend/app/core/config.py
+      relationship_to_domain: reads all env vars; used by every backend module
+      direction: inbound
+
+  external:
+    - name: LM Studio (user-installed)
+      purpose_for_domain: Local LLM inference; must be running before backend starts
+    - name: ffmpeg (system)
+      purpose_for_domain: >
+        openai-whisper requires ffmpeg on PATH to decode audio formats
+
+# ──────────────────────────────────────────────
+# 3. ENVIRONMENT VARIABLES (canonical list)
+# ──────────────────────────────────────────────
+environment_variables:
+  root_env_example_path: .env.example
+  backend:
+    - var: LM_STUDIO_BASE_URL
+      default: "http://localhost:1234/v1"
+      description: Base URL of the LM Studio OpenAI-compatible API
+      required: true
+
+    - var: LM_STUDIO_MODEL
+      default: ""
+      description: >
+        Model identifier as shown in LM Studio (e.g. lmstudio-community/Meta-Llama-3-8B).
+        If empty, backend uses whatever model LM Studio has loaded.
+      required: false
+
+    - var: WHISPER_MODEL
+      default: "base"
+      description: >
+        Whisper model size: tiny | base | small | medium | large.
+        Larger = more accurate but more RAM/VRAM and slower cold start.
+      required: false
+
+    - var: BACKEND_HOST
+      default: "0.0.0.0"
+      description: uvicorn bind host
+      required: false
+
+    - var: BACKEND_PORT
+      default: "8000"
+      description: uvicorn bind port
+      required: false
+
+    - var: CORS_ORIGINS
+      default: "http://localhost:5173"
+      description: >
+        Comma-separated list of allowed origins for FastAPI CORSMiddleware.
+        In dev, Vite proxy removes the need for CORS, but it's good practice.
+      required: false
+
+    - var: LOG_LEVEL
+      default: "info"
+      description: uvicorn/Python log level (debug | info | warning | error)
+      required: false
+
+  frontend:
+    - var: VITE_WS_URL
+      default: "/ws/audio"
+      description: >
+        WebSocket endpoint path. In dev the Vite proxy rewrites this to
+        ws://localhost:8000/ws/audio. In production, set to the full URL.
+      required: false
+
+    - var: VITE_APP_TITLE
+      default: "SpeakToLLM"
+      description: Browser title and header label
+      required: false
+
+# ──────────────────────────────────────────────
+# 4. LOCAL DEV COMMANDS & PROCESS MODEL
+# ──────────────────────────────────────────────
+local_dev:
+  prerequisites:
+    - tool: node
+      min_version: "20"
+      install_hint: "brew install node  # or nvm use 20"
+    - tool: pnpm
+      min_version: "9"
+      install_hint: "npm i -g pnpm"
+    - tool: python
+      min_version: "3.11"
+      install_hint: "brew install python@3.11"
+    - tool: uv
+      min_version: "0.4"
+      install_hint: "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    - tool: ffmpeg
+      install_hint: "brew install ffmpeg  # required by openai-whisper"
+    - tool: LM Studio
+      install_hint: >
+        Download from https://lmstudio.ai, load a model, and start the local
+        server on port 1234 (default).
+
+  one_time_setup:
+    - step: "cp .env.example backend/.env && cp .env.example frontend/.env.local"
+      description: "Seed local env files; edit LM_STUDIO_BASE_URL if non-default"
+    - step: "cd frontend && pnpm install"
+      description: "Install JS dependencies"
+    - step: "cd backend && uv sync"
+      description: "Create venv and install Python dependencies from pyproject.toml"
+    - step: "uv run python -c \"import whisper; whisper.load_model('base')\""
+      description: "Pre-download the Whisper model (one-time, ~150 MB for base)"
+
+  daily_dev_startup:
+    terminal_1:
+      command: "cd backend && uv run uvicorn app.main:app --reload --port 8000"
+      description: "Start Python backend with live reload"
+    terminal_2:
+      command: "cd frontend && pnpm dev"
+      description: "Start Vite dev server on port 5173"
+    combined_script: |
+      # scripts/dev.sh  (requires GNU parallel or run in background)
+      #!/usr/bin/env bash
+      set -e
+      (cd backend && uv run uvicorn app.main:app --reload --port 8000) &
+      (cd frontend && pnpm dev)
+      wait
+    makefile_targets: |
+      dev:
+        @bash scripts/dev.sh
+
+      install:
+        cd frontend && pnpm install
+        cd backend && uv sync
+
+      test:
+        cd backend && uv run pytest
+        cd frontend && pnpm test
+
+      lint:
+        cd backend && uv run ruff check .
+        cd frontend && pnpm lint
+
+  port_map:
+    - service: Vite dev server (React SPA)
+      port: 5173
+      note: "Entry point for developers; proxies /ws/* and /api/* to 8000"
+    - service: FastAPI (uvicorn)
+      port: 8000
+      note: "Direct access for API testing; also the WS origin"
+    - service: LM Studio
+      port: 1234
+      note: "User-managed; must be started separately before the backend"
+
+# ──────────────────────────────────────────────
+# 5. VALIDATION STRATEGY (empty → working scaffold)
+# ──────────────────────────────────────────────
+validation_strategy:
+  phases:
+    - phase: 1_backend_health
+      trigger: "After `uv run uvicorn` starts"
+      checks:
+        - name: HTTP health check
+          command: "curl -s http://localhost:8000/healthz | python -m json.tool"
+          expected: '{"status": "ok", "whisper_loaded": true, "lm_studio_reachable": true}'
+          failure_hint: >
+            whisper_loaded=false → model not downloaded or ffmpeg missing.
+            lm_studio_reachable=false → LM Studio not running or wrong port.
+
+    - phase: 2_websocket_echo
+      trigger: "Backend healthy"
+      checks:
+        - name: WebSocket connectivity
+          command: >
+            npx wscat -c ws://localhost:8000/ws/audio
+            (send a text frame "PING", expect "PONG" or any response)
+          expected: WebSocket upgrade succeeds, no 403/404
+          failure_hint: "Check uvicorn logs; confirm /ws/audio route is registered"
+
+    - phase: 3_frontend_loads
+      trigger: "After `pnpm dev` starts"
+      checks:
+        - name: SPA loads in browser
+          command: "open http://localhost:5173"
+          expected: Cyberpunk UI renders with mic button visible
+          failure_hint: "Check Vite console for TS errors or missing env vars"
+
+    - phase: 4_end_to_end_voice
+      trigger: "All prior phases pass"
+      checks:
+        - name: Voice round-trip
+          command: "Manual: click mic, speak, observe transcription and LLM response"
+          expected: >
+            Audio captured in browser → WebSocket sends binary frames →
+            backend transcribes → LM Studio replies → text appears in chat UI
+          failure_hint: >
+            Check browser DevTools Network WS tab for frame flow.
+            Check backend logs for Whisper output and LM Studio HTTP status.
+
+  ci_smoke_test:
+    description: >
+      In CI (no audio device, no LM Studio), run only the backend unit tests
+      and frontend type-check/lint. Skip phase 3 and 4 in automated pipelines.
+    commands:
+      - "cd backend && uv run pytest tests/ -x"
+      - "cd frontend && pnpm tsc --noEmit && pnpm lint"
+
+# ──────────────────────────────────────────────
+# 6. DOCUMENTATION / WALKTHROUGH EXPECTATIONS
+# ──────────────────────────────────────────────
+documentation_expectations:
+  readme_sections:
+    - title: "Overview"
+      content: "Architecture diagram (ASCII), tech stack, key design decisions"
+    - title: "Prerequisites"
+      content: "Node, pnpm, Python 3.11+, uv, ffmpeg, LM Studio — with install links"
+    - title: "Quick Start"
+      content: >
+        5-step numbered list: clone → cp .env.example → pnpm install + uv sync
+        → start LM Studio → make dev
+    - title: "Environment Variables"
+      content: "Table linking to .env.example; explains VITE_ prefix rule"
+    - title: "Architecture"
+      content: "Data flow: mic → WS → Whisper → LM Studio → UI"
+    - title: "Troubleshooting"
+      content: >
+        - Whisper model not found → run model pre-download command
+        - LM Studio unreachable → check port 1234, check model is loaded
+        - Mic permission denied → browser HTTPS requirement note
+        - Audio format issues → ffmpeg not on PATH
+
+  arch_diagram_ascii: |
+    ┌─────────────────────────┐        ws://localhost:5173/ws/audio (dev proxy)
+    │  Browser (React + Vite) │──────────────────────────────────────────────►│
+    │  useAudioCapture()      │◄──────────────── JSON {text, role} ───────────│
+    └─────────────────────────┘                                                │
+                                                          ┌────────────────────┴─┐
+                                                          │  FastAPI + uvicorn   │
+                                                          │  /ws/audio           │
+                                                          │  whisper_service.py  │
+                                                          │  llm_client.py       │
+                                                          └──────────┬───────────┘
+                                                                     │ HTTP POST
+                                                          ┌──────────▼───────────┐
+                                                          │  LM Studio (local)   │
+                                                          │  :1234/v1/chat/...   │
+                                                          └──────────────────────┘
+
+open_questions:
+  - question: >
+      Should audio be streamed as raw PCM chunks or buffered until silence is
+      detected? The silence-detection boundary affects Whisper accuracy and latency.
+    context: >
+      prompts.md says "after user stops speaking" → implies VAD (Voice Activity
+      Detection) or a PTT (push-to-talk) model. Implementation choice affects the
+      WS protocol design.
+
+  - question: >
+      Which Whisper model size is the default? "base" is fast but less accurate;
+      "small" balances quality vs. speed on most developer laptops.
+    context: >
+      Exposed as WHISPER_MODEL env var with default "base"; final choice is a
+      product decision.
+
+  - question: >
+      Should the LLM response be streamed token-by-token back to the browser
+      (SSE or chunked WS messages) or sent as a single response?
+    context: >
+      Streaming improves perceived latency. LM Studio supports streaming via
+      stream: true in the OpenAI-compat API.
+
+  - question: >
+      Is HTTPS required in production for microphone access (browsers require
+      secure context)? Local dev on localhost is exempt, but this matters for
+      any deployment plan.
+    context: >
+      Browser MediaRecorder / getUserMedia() requires HTTPS except on localhost.
+
+gaps:
+  - area: Audio encoding format contract
+    description: >
+      The exact audio format the browser sends (WebM/opus, WAV, raw PCM) and
+      how the backend decodes it before handing to Whisper is not yet defined.
+    impact: >
+      Whisper expects WAV or MP3; WebM/opus requires server-side decoding via
+      ffmpeg. This is a critical implementation detail for the ws_audio.py service.
+
+  - area: LM Studio model identifier convention
+    description: >
+      LM Studio model names are user-installed and not standardised; the backend
+      must handle the case where no model is active or the model ID is wrong.
+    impact: >
+      Needs a graceful error path and clear user documentation.
+
+  - area: Production deployment (nginx / Docker)
+    description: >
+      This research covers local dev only. Production nginx config (WS upgrade
+      headers, HTTPS termination) and Docker Compose are out of scope but
+      will be needed before any deployment.
+    impact: Low for initial scaffold phase.
