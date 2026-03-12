@@ -7,7 +7,7 @@ from enum import Enum, auto
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services import transcriber as transcriber_service
-from app.services.llm_client import LLMClient, LLMConnectionError
+from app.services.llm_client import LLMClient, LLMConnectionError, Message
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ async def ws_audio(websocket: WebSocket) -> None:
 
     state = _State.IDLE
     audio_chunks: list[bytes] = []
+    conversation_history: list[Message] = []
     llm = LLMClient()
 
     async def _send(data: dict) -> None:  # type: ignore[type-arg]
@@ -92,14 +93,20 @@ async def ws_audio(websocket: WebSocket) -> None:
                     state = _State.LLM_CALLING
                     await _send({"type": "status", "state": "thinking"})
 
+                    user_message = {"role": "user", "content": text}
+
                     try:
-                        reply = await llm.chat(text)
+                        reply = await llm.chat(text, history=list(conversation_history))
                     except LLMConnectionError as exc:
+                        conversation_history.append(user_message)
                         logger.error("LLM connection error: %s", exc)
                         await _send({"type": "error", "message": str(exc)})
                         state = _State.IDLE
                         continue
 
+                    conversation_history.extend(
+                        [user_message, {"role": "assistant", "content": reply}]
+                    )
                     await _send({"type": "llm_response", "text": reply})
                     state = _State.IDLE
                     await _send({"type": "status", "state": "idle"})

@@ -22,9 +22,10 @@
 
 **speak-to-llm** streams microphone audio from the browser over a WebSocket,
 transcribes it with [openai-whisper](https://github.com/openai/whisper), sends the
-transcript to a locally-running [LM Studio](https://lmstudio.ai/) model, and returns
-the response to a cyberpunk-styled React UI — everything runs entirely on your machine,
-no cloud services required.
+latest transcript plus prior in-session chat turns to a locally-running
+[LM Studio](https://lmstudio.ai/) model, and returns the response to a
+cyberpunk-styled React UI — everything runs entirely on your machine, no cloud
+services required.
 
 **Data flow (one utterance):**
 

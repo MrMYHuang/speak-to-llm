@@ -58,3 +58,4 @@ html, body, #root {
 .cp-glow-green { box-shadow: var(--glow-green); }
 .cp-text-glow-cyan { text-shadow: var(--glow-cyan); }
 .cp-text-glow-pink { text-shadow: var(--glow-pink); }
+.cp-text-glow-green { text-shadow: var(--glow-green); }

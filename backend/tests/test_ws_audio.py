@@ -77,6 +77,48 @@ def test_start_binary_stop_yields_transcript_and_llm_response() -> None:
     assert call_audio_bytes == b"\x00" * 200
 
 
+def test_second_turn_includes_prior_chat_history() -> None:
+    """Each new turn should include prior user/assistant messages in the LLM call."""
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = ["First reply", "Second reply"]
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.side_effect = ["first prompt", "second prompt"]
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            ws.receive_json()  # buffering
+            ws.send_json({"type": "stop"})
+            ws.receive_json()  # transcribing
+            ws.receive_json()  # transcript
+            ws.receive_json()  # thinking
+            ws.receive_json()  # llm_response
+            ws.receive_json()  # idle
+
+            ws.send_json({"type": "start"})
+            ws.receive_json()  # buffering
+            ws.send_json({"type": "stop"})
+            ws.receive_json()  # transcribing
+            ws.receive_json()  # transcript
+            ws.receive_json()  # thinking
+            ws.receive_json()  # llm_response
+            ws.receive_json()  # idle
+
+    first_call = mock_llm.chat.await_args_list[0]
+    assert first_call.args == ("first prompt",)
+    assert first_call.kwargs["history"] == []
+
+    second_call = mock_llm.chat.await_args_list[1]
+    assert second_call.args == ("second prompt",)
+    assert second_call.kwargs["history"] == [
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": "First reply"},
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Binary frames before start are silently dropped
 # ---------------------------------------------------------------------------
