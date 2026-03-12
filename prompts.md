@@ -8,4 +8,4 @@ technique stacks:
 2. backend app: python, uv, transformer, openai whisper
 
 # Copilot Command Line:
-copilot --allow-all-urls --allow-all-tools --add-dir . --add-dir /tmp
+copilot --allow-all-urls --allow-all-tools --add-dir . --add-dir /tmp --add-dir /dev/stdin --add-dir /dev/null
