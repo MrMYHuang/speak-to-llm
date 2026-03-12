@@ -13,7 +13,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     <div className={`mb-3 flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
         className={[
-          'max-w-[75%] rounded border px-4 py-2 text-sm whitespace-pre-wrap break-words',
+          'max-w-[75%] rounded border px-4 py-2 text-[20pt] leading-[1.35] whitespace-pre-wrap break-words',
           isUser
             ? 'border-neon-cyan bg-surface text-neon-cyan cp-glow-cyan'
             : 'border-neon-pink bg-surface text-neon-pink',
