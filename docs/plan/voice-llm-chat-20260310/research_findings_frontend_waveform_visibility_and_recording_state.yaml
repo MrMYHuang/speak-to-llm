@@ -1,0 +1,299 @@
+plan_id: voice-llm-chat-20260310
+objective: Show the waveform bar during recording and hide it whenever recording is not active.
+focus_area: frontend waveform visibility and recording state
+created_at: "2026-03-13T15:13:01Z"
+created_by: github-copilot
+status: completed
+
+tldr: |
+  - Recording state is derived in `frontend/src/App.tsx` from `useAudioStream.captureState` and passed to `BottomBar` as `phase`.
+  - `WaveformBar` already exists and is always rendered by `frontend/src/components/BottomBar.tsx`; it only changes color via its `active` prop.
+  - The minimal/safest UI change is to conditionally render the waveform container in `BottomBar` only when `phase === 'recording'`, leaving `useAudioStream` and `useWaveform` behavior unchanged.
+  - Existing frontend validation covers recording toggle state transitions (`App.toggle.test.tsx`) and audio hook lifecycle (`useAudioStream.test.tsx`), but there is no direct test for waveform visibility.
+
+research_metadata:
+  methodology: hybrid code inspection using ripgrep for discovery, targeted file reads for implementation details, and command inspection for validation paths
+  tools_used:
+    - rg
+    - view
+    - bash
+  scope: Examined frontend recording state flow, waveform hook/component wiring, relevant reducer phases, existing tests, and local validation commands.
+  confidence: high
+  coverage: 90
+
+files_analyzed:
+  - file: App.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/App.tsx
+    purpose: Maps audio capture state plus reducer phase into the UI control phase and passes analyser/state into BottomBar.
+    key_elements:
+      - element: controlPhase
+        type: variable
+        location: frontend/src/App.tsx:59
+        description: Derives displayed UI phase from `captureState` (`idle|starting|recording`) and reducer phase.
+      - element: useAudioStream
+        type: function
+        location: frontend/src/App.tsx:57
+        description: Supplies `captureState` and `analyserRef` consumed by the footer UI.
+      - element: BottomBar props
+        type: pattern
+        location: frontend/src/App.tsx:129
+        description: Passes `phase={controlPhase}` and `analyserRef={analyserRef}` into waveform/mic UI.
+    language: TypeScript
+    lines: 137
+  - file: BottomBar.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/BottomBar.tsx
+    purpose: Owns waveform rendering, transcript preview, and mic button layout.
+    key_elements:
+      - element: useWaveform
+        type: function
+        location: frontend/src/components/BottomBar.tsx:15
+        description: Reads live amplitudes from the analyser ref.
+      - element: isRecording
+        type: variable
+        location: frontend/src/components/BottomBar.tsx:16
+        description: Current visibility signal already computed from `phase === 'recording'`.
+      - element: WaveformBar render
+        type: pattern
+        location: frontend/src/components/BottomBar.tsx:21
+        description: Always renders waveform wrapper and component; only `active` toggles appearance.
+    language: TypeScript
+    lines: 43
+  - file: WaveformBar.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/WaveformBar.tsx
+    purpose: Canvas-based waveform visualizer.
+    key_elements:
+      - element: WaveformBar
+        type: function
+        location: frontend/src/components/WaveformBar.tsx:8
+        description: Draws bars from amplitude samples into a canvas.
+      - element: active prop
+        type: variable
+        location: frontend/src/components/WaveformBar.tsx:26
+        description: Changes bar fill color between active and inactive states; does not hide the component.
+    language: TypeScript
+    lines: 49
+  - file: useAudioStream.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/hooks/useAudioStream.ts
+    purpose: Manages microphone lifecycle, analyser creation, websocket start/stop events, and capture state.
+    key_elements:
+      - element: AudioCaptureState
+        type: type
+        location: frontend/src/hooks/useAudioStream.ts:88
+        description: Defines `idle | starting | recording` capture states.
+      - element: analyserRef
+        type: variable
+        location: frontend/src/hooks/useAudioStream.ts:96
+        description: Stable ref set only while audio graph is live.
+      - element: record start transition
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.ts:250
+        description: Sets `captureState` to `recording`, stores the analyser, and dispatches `RECORD_START`.
+      - element: stop teardown transition
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.ts:277
+        description: Sets `captureState` back to `idle`, sends stop event, tears down graph, and clears analyser ref.
+    language: TypeScript
+    lines: 312
+  - file: useWaveform.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/hooks/useWaveform.ts
+    purpose: Produces amplitude samples for the waveform canvas.
+    key_elements:
+      - element: amplitudes baseline
+        type: variable
+        location: frontend/src/hooks/useWaveform.ts:27
+        description: Initializes silence values (`128`) used when no analyser is active.
+      - element: inactive reset
+        type: pattern
+        location: frontend/src/hooks/useWaveform.ts:55
+        description: Resets amplitudes once when analyser disappears.
+    language: TypeScript
+    lines: 69
+  - file: chatReducer.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/store/chatReducer.ts
+    purpose: Defines app UI phases around recording and post-recording processing.
+    key_elements:
+      - element: Phase
+        type: type
+        location: frontend/src/store/chatReducer.ts:25
+        description: Includes `requesting-mic`, `recording`, and `processing` states used by footer UI.
+      - element: RECORD_STOP transition
+        type: pattern
+        location: frontend/src/store/chatReducer.ts:122
+        description: Moves app phase from `recording` to `processing` after stop.
+    language: TypeScript
+    lines: 182
+  - file: App.toggle.test.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/App.toggle.test.tsx
+    purpose: Verifies start/stop toggle behavior and phase-dependent button states.
+    key_elements:
+      - element: click toggle test
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:78
+        description: Confirms start -> stop -> processing flow through the UI.
+      - element: keyboard/global shortcut tests
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:101
+        description: Confirms Enter/Space and global Space shortcut behavior.
+    language: TypeScript
+    lines: 224
+  - file: useAudioStream.test.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/hooks/useAudioStream.test.tsx
+    purpose: Verifies audio hook start/cancel/stop lifecycle guarantees.
+    key_elements:
+      - element: recording transition test
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.test.tsx:109
+        description: Confirms `captureState` reaches `recording` and start event is sent once.
+      - element: stop idempotency test
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.test.tsx:203
+        description: Confirms stop sends a single stop event and returns to idle.
+    language: TypeScript
+    lines: 242
+  - file: package.json
+    path: /Users/myh/Documents/speak-to-llm/frontend/package.json
+    purpose: Declares frontend validation commands.
+    key_elements:
+      - element: scripts
+        type: variable
+        location: frontend/package.json:6
+        description: Provides `build`, `typecheck`, `lint`, and `test` scripts.
+    language: JSON
+    lines: 40
+
+patterns_found:
+  - category: architecture
+    pattern: App derives a footer-friendly phase from capture state and reducer state.
+    description: UI recording affordances prefer `captureState` when mic startup/recording is active, then fall back to reducer phase for idle/processing/responding/error states.
+    examples:
+      - file: frontend/src/App.tsx
+        location: frontend/src/App.tsx:59-64
+        snippet: "const controlPhase = captureState === 'idle' ? state.phase : captureState === 'starting' ? 'requesting-mic' : 'recording'"
+    prevalence: common
+  - category: structure
+    pattern: BottomBar is the single composition point for waveform, transcript preview, and mic control.
+    description: Waveform visibility can be changed locally in the footer without altering the audio capture hook or reducer.
+    examples:
+      - file: frontend/src/components/BottomBar.tsx
+        location: frontend/src/components/BottomBar.tsx:18-23
+        snippet: "<div className=\"mb-3\">\n  <WaveformBar amplitudes={amplitudes} active={isRecording} />\n</div>"
+    prevalence: common
+  - category: structure
+    pattern: WaveformBar uses `active` only for styling.
+    description: The component currently always mounts a canvas and repaints it; inactive state only switches color.
+    examples:
+      - file: frontend/src/components/WaveformBar.tsx
+        location: frontend/src/components/WaveformBar.tsx:21-27
+        snippet: "const activeColor = ...\nconst inactiveColor = ...\nctx.fillStyle = active ? activeColor : inactiveColor"
+    prevalence: common
+  - category: architecture
+    pattern: Waveform samples remain available as silent baseline when analyser is absent.
+    description: `useWaveform` intentionally keeps a stable silent array when not recording, so hiding the component can be done purely in rendering.
+    examples:
+      - file: frontend/src/hooks/useWaveform.ts
+        location: frontend/src/hooks/useWaveform.ts:34-59
+        snippet: "if (analyser !== null) { ... } else if (wasActiveRef.current) { ... setAmplitudes(new Uint8Array(WAVEFORM_BINS).fill(128)) }"
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: App
+      responsibility: Derives the effective footer phase and wires audio/websocket hooks into presentation.
+      location: frontend/src/App.tsx
+      relationship_to_domain: domain depends on this
+    - component: BottomBar
+      responsibility: Renders waveform canvas, transcript preview, and mic button.
+      location: frontend/src/components/BottomBar.tsx
+      relationship_to_domain: domain depends on this
+    - component: useAudioStream
+      responsibility: Owns mic/analyser lifecycle and capture state.
+      location: frontend/src/hooks/useAudioStream.ts
+      relationship_to_domain: domain depends on this
+    - component: useWaveform
+      responsibility: Converts analyser data into UI amplitudes.
+      location: frontend/src/hooks/useWaveform.ts
+      relationship_to_domain: domain depends on this
+  interfaces_used_by_domain:
+    - interface: BottomBarProps
+      location: frontend/src/components/BottomBar.tsx:7
+      usage_pattern: Receives `phase`, `transcript`, `onMicToggle`, and `analyserRef` from App.
+    - interface: AudioStreamHandle
+      location: frontend/src/hooks/useAudioStream.ts:70
+      usage_pattern: Exposes `captureState` and `analyserRef` needed for waveform UI.
+  data_flow_involving_domain: App reads `captureState` and `analyserRef` from `useAudioStream`, derives `controlPhase`, passes both into `BottomBar`, which calls `useWaveform(analyserRef)` and renders `WaveformBar` with the resulting amplitudes.
+  key_relationships_to_domain:
+    - from: frontend/src/App.tsx
+      to: frontend/src/components/BottomBar.tsx
+      relationship: imports
+    - from: frontend/src/components/BottomBar.tsx
+      to: frontend/src/hooks/useWaveform.ts
+      relationship: calls
+    - from: frontend/src/components/BottomBar.tsx
+      to: frontend/src/components/WaveformBar.tsx
+      relationship: imports
+    - from: frontend/src/hooks/useAudioStream.ts
+      to: frontend/src/components/BottomBar.tsx
+      relationship: this uses domain outputs
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+    - TSX
+  frameworks_used_in_domain:
+    - name: React
+      usage_in_domain: Component composition, hooks, reducer-managed UI state.
+    - name: Vitest
+      usage_in_domain: Frontend unit/integration tests for toggle and audio hook flows.
+  libraries_used_in_domain:
+    - name: @testing-library/react
+      purpose_in_domain: Rendering App/hooks and asserting interactive state transitions.
+    - name: @testing-library/user-event
+      purpose_in_domain: Driving click and keyboard interactions in App toggle tests.
+  external_apis_used_in_domain:
+    - name: Web Audio API
+      integration_point: frontend/src/hooks/useAudioStream.ts and frontend/src/hooks/useWaveform.ts
+
+related_conventions:
+  naming_patterns_in_domain: Boolean UI guards use explicit names like `isRecording`; phase values are string unions such as `idle`, `requesting-mic`, `recording`, and `processing`.
+  structure_of_domain: App-level hooks own side effects and pass derived state into narrow presentation components; BottomBar is the localized place to change waveform visibility.
+  error_handling_in_domain: Mic failures are normalized in `useAudioStream` into reducer actions/messages; waveform code itself degrades silently when no analyser or canvas context exists.
+  testing_in_domain: Existing tests validate user-visible state transitions at the App level and lifecycle guarantees at the hook level.
+  documentation_in_domain: Hook files contain detailed header comments describing lifecycle and waveform behavior.
+
+related_dependencies:
+  internal:
+    - component: frontend/src/hooks/useAudioStream.ts
+      relationship_to_domain: Supplies analyser lifecycle and recording state to the waveform UI.
+      direction: outbound
+    - component: frontend/src/hooks/useWaveform.ts
+      relationship_to_domain: Supplies amplitude arrays to the waveform renderer.
+      direction: outbound
+    - component: frontend/src/store/chatReducer.ts
+      relationship_to_domain: Supplies post-stop phases (`processing`, `error`, etc.) consumed by the footer.
+      direction: outbound
+  external:
+    - name: react
+      purpose_for_domain: Hook-driven state and rendering.
+    - name: vitest
+      purpose_for_domain: Relevant automated validation.
+    - name: @testing-library/react
+      purpose_for_domain: UI and hook tests.
+
+testing_patterns:
+  framework: Vitest with Testing Library
+  coverage_areas:
+    - App-level mic toggle click/keyboard flows
+    - useAudioStream start/cancel/stop lifecycle and idempotency
+  test_organization: Tests live alongside source files in `frontend/src/`.
+  mock_patterns:
+    - `App.toggle.test.tsx` mocks `useAudioStream` and `useWebSocket` to isolate UI phase behavior.
+    - `useAudioStream.test.tsx` stubs `AudioContext`, `AudioWorkletNode`, `URL`, and `navigator.mediaDevices`.
+
+open_questions:
+  - question: Should the waveform be hidden during `requesting-mic` as well as `processing`/`idle`/`error`?
+    context: Current code computes `isRecording` strictly as `phase === 'recording'`; the requested behavior matches that guard, but a planner may want explicit confirmation that pre-permission state should remain hidden.
+
+gaps:
+  - area: Waveform-specific test coverage
+    description: No existing test directly asserts that the waveform canvas is present only during active recording.
+    impact: The implementation can be small and localized, but regression protection will require adding or updating a frontend UI test if planners want automated coverage.

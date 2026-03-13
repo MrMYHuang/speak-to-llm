@@ -1,0 +1,327 @@
+plan_id: voice-llm-chat-20260310
+objective: Show the waveform bar during recording and hide it whenever recording is not active.
+focus_area: frontend tests and validation for recording UI
+created_at: "2026-03-13T15:25:00Z"
+created_by: github-copilot
+status: completed
+
+tldr: |
+  - Recording UI coverage currently lives in `frontend/src/App.toggle.test.tsx` and `frontend/src/hooks/useAudioStream.test.tsx`; there is no direct test for `BottomBar` or `WaveformBar` visibility.
+  - `BottomBar` computes `isRecording` from `phase === 'recording'` and currently always renders `WaveformBar`, so visibility tests belong closest to `BottomBar` plus one App-level integration toggle test.
+  - Frontend validation commands already present are `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` in `frontend/package.json`, with Makefile wrappers for lint/typecheck/test.
+
+research_metadata:
+  methodology: targeted repository inspection using ripgrep for test discovery and direct file reads for scripts, components, and existing test patterns
+  tools_used:
+    - task/explore
+    - rg
+    - view
+    - bash
+  scope: Examined frontend test files, package scripts, Makefile wrappers, and the recording UI components directly involved in waveform rendering.
+  confidence: high
+  coverage: 90
+
+files_analyzed:
+  - file: App.toggle.test.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/App.toggle.test.tsx
+    purpose: Integration-style UI tests for the main recording toggle flow.
+    key_elements:
+      - element: pointer toggle coverage
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:78-99
+        description: Verifies start -> stop -> processing transitions and button accessibility state.
+      - element: keyboard toggle coverage
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:101-157
+        description: Verifies Enter, focused Space, and global Space handling.
+      - element: error-phase stop coverage
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:203-223
+        description: Verifies active capture can still be stopped after a reducer error.
+    language: TypeScript
+    lines: 224
+  - file: useAudioStream.test.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/hooks/useAudioStream.test.tsx
+    purpose: Hook-level lifecycle tests for microphone capture state and websocket side effects.
+    key_elements:
+      - element: duplicate start protection
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.test.tsx:109-152
+        description: Asserts captureState transitions to `starting` then `recording` only once.
+      - element: start cancellation
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.test.tsx:154-201
+        description: Asserts stop during startup returns to `idle` and dispatches `MIC_CANCELLED`.
+      - element: idempotent stop
+        type: pattern
+        location: frontend/src/hooks/useAudioStream.test.tsx:203-241
+        description: Asserts a single stop event and final `idle` capture state.
+    language: TypeScript
+    lines: 242
+  - file: BottomBar.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/BottomBar.tsx
+    purpose: Composes waveform, transcript preview, and mic button in the footer.
+    key_elements:
+      - element: isRecording
+        type: variable
+        location: frontend/src/components/BottomBar.tsx:16
+        description: Derives recording-only flag from `phase === 'recording'`.
+      - element: waveform render
+        type: pattern
+        location: frontend/src/components/BottomBar.tsx:21-23
+        description: Always renders waveform container and passes `active={isRecording}`.
+    language: TypeScript
+    lines: 43
+  - file: WaveformBar.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/WaveformBar.tsx
+    purpose: Decorative canvas waveform renderer.
+    key_elements:
+      - element: active styling
+        type: pattern
+        location: frontend/src/components/WaveformBar.tsx:21-27
+        description: Switches fill color based on `active` but does not control visibility.
+      - element: canvas output
+        type: pattern
+        location: frontend/src/components/WaveformBar.tsx:40-47
+        description: Renders a `canvas` with `aria-hidden="true"`.
+    language: TypeScript
+    lines: 49
+  - file: App.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/App.tsx
+    purpose: Maps audio capture state into footer phase and passes analyserRef into BottomBar.
+    key_elements:
+      - element: controlPhase
+        type: variable
+        location: frontend/src/App.tsx:59-65
+        description: Converts `captureState` into UI phases including `requesting-mic` and `recording`.
+      - element: BottomBar wiring
+        type: pattern
+        location: frontend/src/App.tsx:129-134
+        description: Supplies `phase`, `onMicToggle`, and `analyserRef` to the footer.
+    language: TypeScript
+    lines: 137
+  - file: package.json
+    path: /Users/myh/Documents/speak-to-llm/frontend/package.json
+    purpose: Frontend package scripts.
+    key_elements:
+      - element: scripts
+        type: variable
+        location: frontend/package.json:6-12
+        description: Defines `dev`, `build`, `typecheck`, `lint`, `preview`, and `test`.
+    language: JSON
+    lines: 40
+  - file: Makefile
+    path: /Users/myh/Documents/speak-to-llm/Makefile
+    purpose: Repository-level wrappers for frontend validation commands.
+    key_elements:
+      - element: lint-frontend
+        type: pattern
+        location: Makefile:46-47
+        description: Runs `cd frontend && pnpm lint`.
+      - element: typecheck
+        type: pattern
+        location: Makefile:49-50
+        description: Runs `cd frontend && pnpm typecheck`.
+      - element: test
+        type: pattern
+        location: Makefile:52-54
+        description: Runs backend pytest then frontend `pnpm test --run`.
+    language: Makefile
+    lines: 62
+  - file: MessageBubble.test.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/MessageBubble.test.tsx
+    purpose: Representative colocated component test showing local test style conventions.
+    key_elements:
+      - element: colocated test naming
+        type: pattern
+        location: frontend/src/components/MessageBubble.test.tsx:1-5
+        description: Uses colocated `ComponentName.test.tsx` files with jsdom and Testing Library imports.
+      - element: accessibility-first assertions
+        type: pattern
+        location: frontend/src/components/MessageBubble.test.tsx:28-39
+        description: Uses `screen.getByRole` and aria assertions instead of implementation-only selectors where possible.
+    language: TypeScript
+    lines: 86
+
+patterns_found:
+  - category: testing
+    pattern: Recording UI is currently tested at App integration level, not at BottomBar or WaveformBar component level.
+    description: Existing coverage exercises the footer indirectly through `App` toggling and hook state, leaving waveform visibility untested.
+    examples:
+      - file: frontend/src/App.toggle.test.tsx
+        location: frontend/src/App.toggle.test.tsx:78-99
+        snippet: "render(<App />) ... await user.click(button) ... screen.getByRole('button', { name: 'Stop recording' })"
+      - file: frontend/src/hooks/useAudioStream.test.tsx
+        location: frontend/src/hooks/useAudioStream.test.tsx:109-152
+        snippet: "const { result } = renderHook(() => useAudioStream(wsRef, dispatch)) ... expect(result.current.captureState).toBe('recording')"
+    prevalence: common
+  - category: testing
+    pattern: Tests are colocated and use jsdom + Testing Library + Vitest.
+    description: Component tests live beside the component, start with `// @vitest-environment jsdom`, and use `render`, `screen`, and `userEvent` for behavior assertions.
+    examples:
+      - file: frontend/src/components/MessageBubble.test.tsx
+        location: frontend/src/components/MessageBubble.test.tsx:1-5
+        snippet: "// @vitest-environment jsdom\nimport { cleanup, render, screen } from '@testing-library/react'\nimport userEvent from '@testing-library/user-event'"
+      - file: frontend/src/App.toggle.test.tsx
+        location: frontend/src/App.toggle.test.tsx:1-4
+        snippet: "// @vitest-environment jsdom\nimport { cleanup, fireEvent, render, screen } from '@testing-library/react'"
+    prevalence: common
+  - category: testing
+    pattern: Browser-only APIs are stubbed explicitly in tests.
+    description: Audio and canvas-related APIs are mocked in `beforeAll`/`beforeEach` rather than assumed to exist in jsdom.
+    examples:
+      - file: frontend/src/App.toggle.test.tsx
+        location: frontend/src/App.toggle.test.tsx:55-65
+        snippet: "Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', { ... value: vi.fn(() => null) })"
+      - file: frontend/src/hooks/useAudioStream.test.tsx
+        location: frontend/src/hooks/useAudioStream.test.tsx:68-100
+        snippet: "vi.stubGlobal('AudioContext', ...)\nvi.stubGlobal('AudioWorkletNode', ...)\nvi.stubGlobal('URL', ...)"
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: App
+      responsibility: Owns reducer state and audio hook wiring for the recording footer.
+      location: frontend/src/App.tsx
+      relationship_to_domain: domain depends on this
+    - component: BottomBar
+      responsibility: Decides whether the waveform and mic UI are visible/rendered.
+      location: frontend/src/components/BottomBar.tsx
+      relationship_to_domain: domain depends on this
+    - component: WaveformBar
+      responsibility: Draws the decorative waveform canvas.
+      location: frontend/src/components/WaveformBar.tsx
+      relationship_to_domain: domain depends on this
+    - component: useAudioStream
+      responsibility: Produces `captureState` and `analyserRef` used by the footer.
+      location: frontend/src/hooks/useAudioStream.ts
+      relationship_to_domain: domain depends on this
+  interfaces_used_by_domain:
+    - interface: BottomBarProps
+      location: frontend/src/components/BottomBar.tsx:7-12
+      usage_pattern: Receives `phase`, `transcript`, `onMicToggle`, and `analyserRef`.
+    - interface: WaveformBarProps
+      location: frontend/src/components/WaveformBar.tsx:3-6
+      usage_pattern: Receives `amplitudes` and `active` for canvas rendering.
+  data_flow_involving_domain: App derives `controlPhase` from `useAudioStream.captureState` and reducer `phase`, passes that into BottomBar, BottomBar derives `isRecording`, and WaveformBar currently renders on every footer paint with only its `active` styling changing.
+  key_relationships_to_domain:
+    - from: frontend/src/App.tsx
+      to: frontend/src/components/BottomBar.tsx
+      relationship: imports
+    - from: frontend/src/components/BottomBar.tsx
+      to: frontend/src/components/WaveformBar.tsx
+      relationship: imports
+    - from: frontend/src/components/BottomBar.tsx
+      to: frontend/src/hooks/useWaveform.ts
+      relationship: imports
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+    - TSX
+  frameworks_used_in_domain:
+    - name: React
+      usage_in_domain: Component composition and hooks for recording UI.
+    - name: Vitest
+      usage_in_domain: Unit/integration frontend testing.
+  libraries_used_in_domain:
+    - name: @testing-library/react
+      purpose_in_domain: Render UI and assert DOM behavior.
+    - name: @testing-library/user-event
+      purpose_in_domain: Simulate user interactions like clicks and keyboard input.
+  external_apis_used_in_domain:
+    - name: Canvas 2D API
+      integration_point: frontend/src/components/WaveformBar.tsx:15-37
+
+related_conventions:
+  naming_patterns_in_domain: Test files are colocated with source and use `*.test.tsx` or `*.test.ts`; components and props use PascalCase exports, while derived booleans like `isRecording` are named explicitly.
+  structure_of_domain: UI behavior tests prefer one file per component/hook area, with App-level toggle scenarios in `App.toggle.test.tsx` and hook state coverage in `hooks/useAudioStream.test.tsx`.
+  error_handling_in_domain: Existing tests cover error-adjacent recording behavior by driving reducer errors and asserting the control remains stoppable (`frontend/src/App.toggle.test.tsx:203-223`).
+  testing_in_domain: Prefer jsdom, Testing Library, `userEvent.setup()`, and accessible role/name assertions; fall back to DOM selectors only for decorative canvas elements.
+  documentation_in_domain: Source files contain concise inline comments describing lifecycle intent, e.g. waveform hook comments in `frontend/src/hooks/useWaveform.ts:1-16`.
+
+related_dependencies:
+  internal:
+    - component: frontend/src/App.tsx
+      relationship_to_domain: provides footer phase and analyser ref to recording UI tests
+      direction: inbound
+    - component: frontend/src/components/BottomBar.tsx
+      relationship_to_domain: primary render point for waveform visibility logic
+      direction: bidirectional
+    - component: frontend/src/hooks/useWaveform.ts
+      relationship_to_domain: supplies amplitudes to WaveformBar regardless of visibility changes
+      direction: outbound
+  external:
+    - name: vitest
+      purpose_for_domain: Test runner and mocking APIs.
+    - name: @testing-library/react
+      purpose_for_domain: DOM rendering and assertions.
+    - name: @testing-library/user-event
+      purpose_for_domain: Click and keyboard simulation.
+
+recommended_test_additions:
+  - title: BottomBar conditional rendering by phase
+    target_file: /Users/myh/Documents/speak-to-llm/frontend/src/components/BottomBar.test.tsx
+    rationale: The visibility requirement is implemented at the footer composition point, where `isRecording` is already derived.
+    assertions:
+      - render BottomBar with `phase="idle"` and assert no `canvas[aria-hidden="true"]` is present
+      - render BottomBar with `phase="requesting-mic"` and assert no waveform canvas is present
+      - render BottomBar with `phase="recording"` and assert the waveform canvas is present
+      - render BottomBar with `phase="processing"` and assert the waveform canvas is removed again
+    supporting_references:
+      - frontend/src/components/BottomBar.tsx:14-23
+      - frontend/src/components/WaveformBar.tsx:40-47
+  - title: App integration toggle for show/hide behavior
+    target_file: /Users/myh/Documents/speak-to-llm/frontend/src/App.toggle.test.tsx
+    rationale: Existing recording toggle tests already mock `useAudioStream` and cover user flows, so one additional integration assertion fits the current test style.
+    assertions:
+      - initial render shows no waveform canvas while capture state is idle
+      - after clicking `Start recording`, waveform canvas appears while the stop button is shown
+      - after clicking `Stop recording`, waveform canvas disappears while processing state is shown
+    supporting_references:
+      - frontend/src/App.toggle.test.tsx:78-99
+      - frontend/src/App.tsx:57-65
+      - frontend/src/App.tsx:129-134
+  - title: Keep WaveformBar drawing tests separate from visibility tests
+    target_file: /Users/myh/Documents/speak-to-llm/frontend/src/components/WaveformBar.test.tsx
+    rationale: `WaveformBar` itself controls drawing/styling, not whether it is mounted; if test coverage is added here, it should stay focused on canvas behavior like `aria-hidden` or inactive/active styling.
+    assertions:
+      - canvas renders with `aria-hidden="true"`
+      - canvas effect tolerates a missing 2D context in jsdom via mocked `getContext`
+    supporting_references:
+      - frontend/src/components/WaveformBar.tsx:11-16
+      - frontend/src/components/WaveformBar.tsx:40-47
+
+validation_commands:
+  direct_frontend_scripts:
+    - command: cd frontend && pnpm lint
+      source: frontend/package.json:10
+      expands_to: eslint .
+    - command: cd frontend && pnpm typecheck
+      source: frontend/package.json:9
+      expands_to: tsc -b
+    - command: cd frontend && pnpm test
+      source: frontend/package.json:12
+      expands_to: vitest run
+    - command: cd frontend && pnpm build
+      source: frontend/package.json:8
+      expands_to: tsc -b && vite build
+  repository_wrappers:
+    - command: make lint-frontend
+      source: Makefile:46-47
+      expands_to: cd frontend && pnpm lint
+    - command: make typecheck
+      source: Makefile:49-50
+      expands_to: cd frontend && pnpm typecheck
+    - command: make test
+      source: Makefile:52-54
+      expands_to: cd backend && uv run pytest -q && cd frontend && pnpm test --run
+
+open_questions:
+  - question: Should `requesting-mic` count as "recording active" for waveform visibility, or should the waveform remain hidden until `phase === 'recording'` only?
+    context: Existing footer logic names the boolean `isRecording` and derives it strictly from `phase === 'recording'` (`frontend/src/components/BottomBar.tsx:16`), while the mic button treats both `requesting-mic` and `recording` as pressed (`frontend/src/components/MicButton.tsx:56`).
+
+gaps:
+  - area: direct waveform visibility tests
+    description: No existing test currently asserts waveform mount/unmount or canvas presence across recording phases.
+    impact: Implementers can change visibility behavior without immediate regression coverage unless new BottomBar/App assertions are added.

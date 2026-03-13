@@ -2,21 +2,20 @@ plan_id: voice-llm-chat-20260310
 objective: >
   Preserve the shipped voice-first LLM chat app and completed backend hardening work while
   adding a follow-up execution wave: expose assistant `<think>` text to the client for
-  collapsible cyberpunk-green 14pt rendering and allow the speak / stop toggle to be
-  triggered by the Space key without changing the websocket message shape.
+  collapsible cyberpunk-green 14pt rendering, allow the speak / stop toggle to be
+  triggered by the Space key without changing the websocket message shape, and show the
+  waveform bar only during active recording.
 created_at: "2026-03-10"
 created_by: gem-team/gem-planner
-status: completed
+status: in_progress
 research_confidence: high
 
 tldr: |
-  Existing waves task-001 through task-014 remain completed and preserved.
-  Follow-up Wave 8 is planned: task-015 through task-018 add raw `<think>` delivery to
-  the live client path, collapsible 14pt neon-green think-block rendering, and a guarded
-  page-level Space shortcut that reuses the existing speak / stop toggle contract.
-  The execution assumption for keyboard handling is that focused button Enter/Space keeps
-  native semantics, while an unfocused Space press triggers the mic toggle only when the
-  event target is not an editable or interactive control.
+  Existing waves task-001 through task-018 remain completed and preserved.
+  Follow-up Wave 9 is planned: task-019 conditionally shows the waveform bar only while
+  recording, and task-020 validates that the bar is hidden in every non-recording phase.
+  The new wave is intentionally limited to the frontend footer so prior think-block and
+  Space-key work stays untouched.
 
 open_questions:
   - If a future text input or prompt editor is added, the global Space shortcut should be
@@ -98,6 +97,13 @@ pre_mortem:
         interactive targets, skips modified key presses, relies on native button behavior
         when the mic button already owns focus, and only calls `preventDefault()` when the
         shortcut is actually handled.
+    - scenario: Waveform visibility is keyed off the wrong UI phase and stays visible while the app is requesting mic access, processing, or responding
+      likelihood: medium
+      impact: medium
+      mitigation: >
+        Keep the visibility guard localized to `BottomBar` using the existing
+        `phase === 'recording'` signal and add frontend regression coverage for both
+        recording and non-recording phases.
 
   assumptions:
     - Developer has Python 3.11+, Node.js 20+, pnpm, uv, and git installed locally.
@@ -116,6 +122,8 @@ pre_mortem:
       history remains sanitized so prior backend safety guarantees still hold.
     - Frontend follow-up scope now includes think-block rendering plus guarded keyboard
       activation while keeping the backend websocket `start` / `stop` control contract unchanged.
+    - The waveform bar should remain hidden for every phase except `recording`, including
+      `idle`, `requesting-mic`, `processing`, `responding`, and `error`.
 
 implementation_specification:
   code_structure: |
@@ -1258,3 +1266,89 @@ tasks:
           - Focus an editable or interactive control used in the validation harness
           - Press Space while that control remains focused
         expected_result: The mic toggle does not fire and the control retains normal keyboard behavior
+
+  - id: task-019
+    title: Frontend — show the waveform bar only while recording
+    description: |
+      Deliver the footer-only waveform visibility follow-up without changing the audio or
+      websocket contracts:
+        - Update `frontend/src/components/BottomBar.tsx` so the waveform wrapper mounts only
+          when `phase === 'recording'`
+        - Leave `useAudioStream`, `useWaveform`, and `WaveformBar` behavior unchanged unless
+          a tiny testability adjustment is required for the visibility assertion
+        - Add or update focused frontend regression coverage so the waveform is present during
+          recording and absent in non-recording phases such as idle, requesting-mic, and processing
+    agent: gem-team/gem-implementer
+    priority: medium
+    status: completed
+    dependencies:
+      - task-014
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_waveform_visibility: docs/plan/voice-llm-chat-20260310/research_findings_frontend_waveform_visibility_and_recording_state.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 70
+    focus_area: frontend-waveform-visibility
+    verification:
+      - "The waveform bar renders while the footer phase is `recording`"
+      - "The waveform bar is not rendered for non-recording phases including `idle`, `requesting-mic`, and `processing`"
+      - "Existing mic toggle behavior remains unchanged after the visibility guard is added"
+    acceptance_criteria:
+      - Users see the waveform bar during active recording only
+      - The footer no longer shows an inactive waveform placeholder when recording is not active
+      - Frontend regression coverage documents the recording-only visibility contract
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - React
+      - TypeScript
+      - Vitest
+      - Testing Library
+    test_coverage: "frontend waveform visibility regression coverage for BottomBar/App phase rendering"
+    failure_modes:
+      - scenario: The waveform is hidden based on analyser availability instead of the footer phase, so it flashes during requesting-mic or lingers after stop
+        likelihood: medium
+        impact: medium
+        mitigation: Use the existing `phase === 'recording'` guard in `BottomBar` and assert the full phase transition in frontend tests
+
+  - id: task-020
+    title: Validation — verify recording-only waveform visibility
+    description: |
+      Validate the waveform follow-up after implementation lands:
+        - Confirm the waveform bar appears once recording becomes active
+        - Confirm it disappears again after stop and stays hidden during other non-recording states
+        - Check for footer regressions such as transcript layout shifts or broken mic-toggle flow
+          while exercising the normal record / stop interaction path
+    agent: gem-team/gem-browser-tester
+    priority: low
+    status: completed
+    dependencies:
+      - task-019
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_waveform_visibility: docs/plan/voice-llm-chat-20260310/research_findings_frontend_waveform_visibility_and_recording_state.yaml
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 40
+    focus_area: waveform-visibility-validation
+    verification:
+      - "Validation confirms the waveform is visible during recording and hidden before start and after stop"
+      - "No footer interaction regression appears during a normal recording cycle"
+    acceptance_criteria:
+      - The follow-up wave has a concrete validation record for the recording-only waveform behavior
+      - No blocker regression remains in the footer recording flow after the UI change lands
+    requires_review: false
+    validation_matrix:
+      - scenario: waveform visible during active recording
+        steps:
+          - Load the app and confirm the footer is idle
+          - Start recording through the normal mic control
+          - Observe the footer while recording remains active
+        expected_result: The waveform bar is visible only after recording starts
+      - scenario: waveform hidden outside recording
+        steps:
+          - Stop the recording and allow the footer to leave the recording state
+          - Observe the footer during processing and after it returns to idle
+        expected_result: The waveform bar is hidden as soon as recording stops and remains hidden outside the recording phase

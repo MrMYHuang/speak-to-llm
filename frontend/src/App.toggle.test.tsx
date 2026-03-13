@@ -80,11 +80,14 @@ describe('App toggle speak control', () => {
 
     render(<App />)
 
+    expect(screen.queryByTestId('waveform-bar')).toBeNull()
+
     const button = screen.getByRole('button', { name: 'Start recording' })
 
     await user.click(button)
     expect(startSpy).toHaveBeenCalledTimes(1)
     expect(stopSpy).not.toHaveBeenCalled()
+    expect(screen.getByTestId('waveform-bar')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Stop recording' }).getAttribute('aria-pressed')).toBe(
       'true',
     )
@@ -92,6 +95,7 @@ describe('App toggle speak control', () => {
     await user.click(screen.getByRole('button', { name: 'Stop recording' }))
     expect(startSpy).toHaveBeenCalledTimes(1)
     expect(stopSpy).toHaveBeenCalledTimes(1)
+    expect(screen.queryByTestId('waveform-bar')).toBeNull()
     expect(
       screen.getByRole('button', { name: 'Processing — please wait' }).getAttribute('aria-pressed'),
     ).toBe('false')

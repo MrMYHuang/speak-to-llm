@@ -1,0 +1,45 @@
+{
+  "task_id": "task-020",
+  "plan_id": "voice-llm-chat-20260310",
+  "recorded_at": "2026-03-13T15:32:03Z",
+  "status": "success",
+  "validation_method": "repo validation",
+  "summary": "Focused Vitest coverage and full frontend test/typecheck validation confirmed the waveform renders only during recording and remains hidden before start and after stop without footer toggle regressions.",
+  "scenarios": [
+    {
+      "scenario": "waveform visible during active recording",
+      "evidence": [
+        "src/components/BottomBar.test.tsx verifies the waveform renders for phase=\"recording\".",
+        "src/App.toggle.test.tsx verifies the waveform is absent before start, becomes visible after the normal mic toggle starts recording, and the stop control remains aria-pressed while active."
+      ],
+      "expected_result": "The waveform bar is visible only after recording starts",
+      "result": "passed"
+    },
+    {
+      "scenario": "waveform hidden outside recording",
+      "evidence": [
+        "src/components/BottomBar.test.tsx verifies the waveform is hidden for idle, requesting-mic, and processing phases.",
+        "src/App.toggle.test.tsx verifies the waveform disappears after stop and the footer transitions into processing without a broken mic-toggle flow."
+      ],
+      "expected_result": "The waveform bar is hidden as soon as recording stops and remains hidden outside the recording phase",
+      "result": "passed"
+    }
+  ],
+  "commands": [
+    "cd frontend && pnpm exec vitest run src/components/BottomBar.test.tsx src/App.toggle.test.tsx",
+    "cd frontend && pnpm test",
+    "cd frontend && pnpm typecheck"
+  ],
+  "results": {
+    "focused_tests": "passed (9 tests)",
+    "frontend_suite": "passed (22 tests)",
+    "typecheck": "passed"
+  },
+  "console_errors": 0,
+  "network_failures": 0,
+  "accessibility_issues": 0,
+  "notes": [
+    "Validation was completed through existing repository test coverage rather than a live browser session.",
+    "No transcript layout or mic-toggle regression was observed in the record/stop test path."
+  ]
+}

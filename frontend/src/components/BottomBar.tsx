@@ -18,9 +18,11 @@ export function BottomBar({ phase, transcript, onMicToggle, analyserRef }: Botto
   return (
     <footer className="border-t border-border bg-surface px-4 pb-6 pt-3">
       {/* Live waveform visualiser */}
-      <div className="mb-3">
-        <WaveformBar amplitudes={amplitudes} active={isRecording} />
-      </div>
+      {isRecording && (
+        <div className="mb-3" data-testid="waveform-bar">
+          <WaveformBar amplitudes={amplitudes} active />
+        </div>
+      )}
 
       {/* Live transcript preview */}
       {transcript && (
