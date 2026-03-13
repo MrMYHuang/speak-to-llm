@@ -1,5 +1,5 @@
 /**
- * useAudioStream — push-to-talk audio capture at 16 kHz mono.
+ * useAudioStream — toggle-driven audio capture at 16 kHz mono.
  *
  * Protocol (matches backend expectation):
  *   1. JSON  { type: 'start', sample_rate: 16000, encoding: 'pcm_int16' }
@@ -28,7 +28,7 @@
  * it without triggering re-renders when the node is swapped.
  */
 
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Dispatch, RefObject } from 'react'
 import type { ChatAction } from '@/store/chatReducer'
 
@@ -76,12 +76,16 @@ export interface AudioStreamHandle {
   startRecording: () => Promise<void>
   /** Disconnect the audio graph, stop all tracks, and send the stop event. */
   stopRecording: () => void
+  /** UI-facing capture state so controls can stop/cancel even if reducer phase drifts. */
+  captureState: AudioCaptureState
   /**
    * Ref to the live AnalyserNode while recording (null otherwise).
    * Pass to `useWaveform` for real-time amplitude visualisation.
    */
   analyserRef: RefObject<AnalyserNode | null>
 }
+
+export type AudioCaptureState = 'idle' | 'starting' | 'recording'
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
@@ -90,12 +94,16 @@ export function useAudioStream(
   dispatch: Dispatch<ChatAction>,
 ): AudioStreamHandle {
   const analyserRef = useRef<AnalyserNode | null>(null)
+  const [captureState, setCaptureState] = useState<AudioCaptureState>('idle')
 
   // Refs hold mutable audio resources so that startRecording / stopRecording
   // closures always see the latest values without stale closure issues.
   const ctxRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const workletRef = useRef<AudioWorkletNode | null>(null)
+  const sessionIdRef = useRef(0)
+  const isStartingRef = useRef(false)
+  const isRecordingRef = useRef(false)
 
   // ── Send helper ─────────────────────────────────────────────────────────────
 
@@ -118,8 +126,12 @@ export function useAudioStream(
 
   const teardown = useCallback(() => {
     console.debug('[audio] tearing down audio graph')
-    workletRef.current?.port.close()
-    workletRef.current?.disconnect()
+    const worklet = workletRef.current
+    if (worklet !== null) {
+      worklet.port.onmessage = null
+    }
+    worklet?.port.close()
+    worklet?.disconnect()
     workletRef.current = null
 
     streamRef.current?.getTracks().forEach(t => t.stop())
@@ -130,16 +142,24 @@ export function useAudioStream(
     ctxRef.current = null
 
     analyserRef.current = null
+    isStartingRef.current = false
+    isRecordingRef.current = false
   }, [])
 
   // ── startRecording ──────────────────────────────────────────────────────────
 
   const startRecording = useCallback(async () => {
-    // Idempotent: tear down any previous capture session first.
-    teardown()
+    if (isStartingRef.current || isRecordingRef.current) {
+      console.debug('[audio] ignored duplicate start request')
+      return
+    }
 
     // Signal the phase transition before the permission prompt so the UI can
     // show a "waiting for mic" state immediately.
+    const sessionId = sessionIdRef.current + 1
+    sessionIdRef.current = sessionId
+    isStartingRef.current = true
+    setCaptureState('starting')
     dispatch({ type: 'MIC_REQUESTING' })
 
     try {
@@ -157,14 +177,27 @@ export function useAudioStream(
           autoGainControl: true,
         },
       })
+      if (sessionId !== sessionIdRef.current) {
+        stream.getTracks().forEach(track => track.stop())
+        return
+      }
       streamRef.current = stream
 
       const ctx = new AudioContext({ sampleRate: 16000 })
+      if (sessionId !== sessionIdRef.current) {
+        stream.getTracks().forEach(track => track.stop())
+        void ctx.close().catch(() => undefined)
+        return
+      }
       ctxRef.current = ctx
 
       // Resume from suspended state (browser autoplay policy).
       if (ctx.state === 'suspended') {
         await ctx.resume()
+        if (sessionId !== sessionIdRef.current) {
+          teardown()
+          return
+        }
       }
 
       if (!ctx.audioWorklet) {
@@ -179,6 +212,10 @@ export function useAudioStream(
         await ctx.audioWorklet.addModule(blobUrl)
       } finally {
         URL.revokeObjectURL(blobUrl)
+      }
+      if (sessionId !== sessionIdRef.current) {
+        teardown()
+        return
       }
 
       // Build audio graph.
@@ -212,26 +249,53 @@ export function useAudioStream(
 
       // Mic is live — transition to recording phase.
       console.info('[audio] recording started')
+      isRecordingRef.current = true
+      setCaptureState('recording')
       dispatch({ type: 'RECORD_START' })
     } catch (err) {
+      setCaptureState('idle')
       teardown()
-      const message =
-        err instanceof DOMException && err.name === 'NotAllowedError'
-          ? 'Microphone permission was denied. Please allow access and try again.'
-          : err instanceof DOMException && err.name === 'NotFoundError'
-            ? 'No microphone was found. Please connect one and try again.'
-            : err instanceof Error
-              ? err.message
-              : 'Could not start the microphone.'
-      console.error('[audio] failed to start recording', err)
-      dispatch({ type: 'MIC_ERROR', error: message })
+      if (sessionId === sessionIdRef.current) {
+        const message =
+          err instanceof DOMException && err.name === 'NotAllowedError'
+            ? 'Microphone permission was denied. Please allow access and try again.'
+            : err instanceof DOMException && err.name === 'NotFoundError'
+              ? 'No microphone was found. Please connect one and try again.'
+              : err instanceof Error
+                ? err.message
+                : 'Could not start the microphone.'
+        console.error('[audio] failed to start recording', err)
+        dispatch({ type: 'MIC_ERROR', error: message })
+      }
+    } finally {
+      if (sessionId === sessionIdRef.current) {
+        isStartingRef.current = false
+      }
     }
   }, [teardown, dispatch, wsSend])
 
   const stopRecording = useCallback(() => {
+    if (isStartingRef.current) {
+      console.debug('[audio] cancelling microphone startup')
+      sessionIdRef.current += 1
+      isStartingRef.current = false
+      setCaptureState('idle')
+      teardown()
+      dispatch({ type: 'MIC_CANCELLED' })
+      return
+    }
+
+    if (!isRecordingRef.current) {
+      console.debug('[audio] ignored duplicate stop request')
+      return
+    }
+
     // Tell the backend the utterance has ended before releasing resources so
     // the stop frame is guaranteed to be sent over an open socket.
     console.info('[audio] stopping recording')
+    sessionIdRef.current += 1
+    isRecordingRef.current = false
+    setCaptureState('idle')
     wsSend(STOP_EVENT)
     teardown()
     dispatch({ type: 'RECORD_STOP' })
@@ -244,5 +308,5 @@ export function useAudioStream(
     // teardown is stable (wrapped in useCallback with no deps).
   }, [teardown])
 
-  return { startRecording, stopRecording, analyserRef }
+  return { startRecording, stopRecording, captureState, analyserRef }
 }

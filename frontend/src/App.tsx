@@ -1,4 +1,4 @@
-import { useReducer } from 'react'
+import { useCallback, useReducer } from 'react'
 import { chatReducer, initialState } from '@/store/chatReducer'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useAudioStream } from '@/hooks/useAudioStream'
@@ -18,7 +18,34 @@ export default function App() {
   const [state, dispatch] = useReducer(chatReducer, initialState)
 
   const { wsRef, wsStatus } = useWebSocket(WS_URL, dispatch)
-  const { startRecording, stopRecording, analyserRef } = useAudioStream(wsRef, dispatch)
+  const { startRecording, stopRecording, captureState, analyserRef } = useAudioStream(wsRef, dispatch)
+
+  const controlPhase =
+    captureState === 'idle'
+      ? state.phase
+      : captureState === 'starting'
+        ? 'requesting-mic'
+        : 'recording'
+
+  const handleMicToggle = useCallback(() => {
+    if (captureState !== 'idle') {
+      stopRecording()
+      return
+    }
+
+    switch (state.phase) {
+      case 'idle':
+      case 'responding':
+      case 'error':
+        void startRecording()
+        return
+      case 'recording':
+        stopRecording()
+        return
+      default:
+        return
+    }
+  }, [captureState, state.phase, startRecording, stopRecording])
 
   return (
     <div className="flex h-full flex-col bg-bg text-cp-text">
@@ -42,10 +69,9 @@ export default function App() {
       </div>
 
       <BottomBar
-        phase={state.phase}
+        phase={controlPhase}
         transcript={state.transcript}
-        onMicDown={startRecording}
-        onMicUp={stopRecording}
+        onMicToggle={handleMicToggle}
         analyserRef={analyserRef}
       />
     </div>

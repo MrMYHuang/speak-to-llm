@@ -4,9 +4,9 @@
  * Phases
  * ──────
  * idle           – app mounted; WS may or may not be connected (see wsStatus)
- * requesting-mic – PTT pressed, getUserMedia in flight
+ * requesting-mic – recording toggle pressed, getUserMedia in flight
  * recording      – mic granted, binary audio frames going out
- * processing     – PTT released, waiting for transcript + LLM response
+ * processing     – recording stopped, waiting for transcript + LLM response
  * responding     – LLM response received and displayed
  * error          – recoverable error requiring user attention
  *
@@ -74,8 +74,10 @@ export type ChatAction =
   | { type: 'MIC_REQUESTING' }
   /** getUserMedia resolved — mic active, start sending frames. */
   | { type: 'RECORD_START' }
-  /** User released push-to-talk. */
+  /** User toggled recording off. */
   | { type: 'RECORD_STOP' }
+  /** User cancelled microphone startup before recording began. */
+  | { type: 'MIC_CANCELLED' }
   /** getUserMedia rejected or AudioWorklet unavailable. */
   | { type: 'MIC_ERROR'; error: string }
   /** Parsed JSON frame received from the backend. */
@@ -106,7 +108,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     // Recording lifecycle ─────────────────────────────────────────────────────
 
     case 'MIC_REQUESTING':
-      if (phase === 'idle' || phase === 'responding') {
+      if (phase === 'idle' || phase === 'responding' || phase === 'error') {
         return { ...state, phase: 'requesting-mic', errorMessage: null }
       }
       return state
@@ -120,6 +122,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'RECORD_STOP':
       if (phase === 'recording') {
         return { ...state, phase: 'processing' }
+      }
+      return state
+
+    case 'MIC_CANCELLED':
+      if (phase === 'requesting-mic') {
+        return { ...state, phase: 'idle' }
       }
       return state
 

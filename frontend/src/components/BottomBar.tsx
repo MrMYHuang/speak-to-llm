@@ -7,12 +7,11 @@ import { WaveformBar } from './WaveformBar'
 export interface BottomBarProps {
   phase: Phase
   transcript: string
-  onMicDown: () => void
-  onMicUp: () => void
+  onMicToggle: () => void
   analyserRef: RefObject<AnalyserNode | null>
 }
 
-export function BottomBar({ phase, transcript, onMicDown, onMicUp, analyserRef }: BottomBarProps) {
+export function BottomBar({ phase, transcript, onMicToggle, analyserRef }: BottomBarProps) {
   const { amplitudes } = useWaveform(analyserRef)
   const isRecording = phase === 'recording'
 
@@ -35,9 +34,9 @@ export function BottomBar({ phase, transcript, onMicDown, onMicUp, analyserRef }
         </p>
       )}
 
-      {/* Mic push-to-talk */}
+      {/* Mic recording toggle */}
       <div className="flex justify-center">
-        <MicButton phase={phase} onPressStart={onMicDown} onPressEnd={onMicUp} />
+        <MicButton phase={phase} onToggle={onMicToggle} />
       </div>
     </footer>
   )

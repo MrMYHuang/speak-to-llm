@@ -10,19 +10,19 @@ interface Config {
 const PHASE_CONFIG: Record<Phase, Config> = {
   idle: {
     label: '⏺',
-    ariaLabel: 'Hold to speak',
+    ariaLabel: 'Start recording',
     classes: 'border-neon-cyan text-neon-cyan cp-glow-cyan hover:opacity-80',
     disabled: false,
   },
   'requesting-mic': {
-    label: '⏺',
-    ariaLabel: 'Requesting microphone access',
+    label: '⏹',
+    ariaLabel: 'Cancel recording',
     classes: 'border-neon-pink text-neon-pink animate-pulse',
-    disabled: true,
+    disabled: false,
   },
   recording: {
     label: '⏹',
-    ariaLabel: 'Recording — release to send',
+    ariaLabel: 'Stop recording',
     classes: 'border-neon-pink text-neon-pink cp-glow-pink animate-pulse',
     disabled: false,
   },
@@ -34,13 +34,13 @@ const PHASE_CONFIG: Record<Phase, Config> = {
   },
   responding: {
     label: '⏺',
-    ariaLabel: 'Hold to speak',
+    ariaLabel: 'Start recording',
     classes: 'border-neon-cyan text-neon-cyan cp-glow-cyan hover:opacity-80',
     disabled: false,
   },
   error: {
     label: '⏺',
-    ariaLabel: 'Hold to speak',
+    ariaLabel: 'Start recording',
     classes: 'border-neon-cyan text-neon-cyan cp-glow-cyan hover:opacity-80',
     disabled: false,
   },
@@ -48,34 +48,18 @@ const PHASE_CONFIG: Record<Phase, Config> = {
 
 export interface MicButtonProps {
   phase: Phase
-  onPressStart: () => void
-  onPressEnd: () => void
+  onToggle: () => void
 }
 
-export function MicButton({ phase, onPressStart, onPressEnd }: MicButtonProps) {
+export function MicButton({ phase, onToggle }: MicButtonProps) {
   const { label, ariaLabel, classes, disabled } = PHASE_CONFIG[phase]
-
-  function handleKeyDown(e: React.KeyboardEvent<HTMLButtonElement>) {
-    if (disabled) return
-    if ((e.code === 'Space' || e.code === 'Enter') && !e.repeat) {
-      e.preventDefault()
-      onPressStart()
-    }
-  }
-
-  function handleKeyUp(e: React.KeyboardEvent<HTMLButtonElement>) {
-    if (disabled) return
-    if (e.code === 'Space' || e.code === 'Enter') {
-      e.preventDefault()
-      onPressEnd()
-    }
-  }
+  const isPressed = phase === 'requesting-mic' || phase === 'recording'
 
   return (
     <button
       type="button"
       aria-label={ariaLabel}
-      aria-pressed={phase === 'recording'}
+      aria-pressed={isPressed}
       disabled={disabled}
       className={[
         'h-16 w-16 rounded-full border-2 text-2xl',
@@ -85,11 +69,7 @@ export function MicButton({ phase, onPressStart, onPressEnd }: MicButtonProps) {
         classes,
         disabled ? 'cursor-not-allowed' : 'cursor-pointer',
       ].join(' ')}
-      onPointerDown={() => !disabled && onPressStart()}
-      onPointerUp={() => !disabled && onPressEnd()}
-      onPointerLeave={() => phase === 'recording' && onPressEnd()}
-      onKeyDown={handleKeyDown}
-      onKeyUp={handleKeyUp}
+      onClick={() => !disabled && onToggle()}
     >
       {label}
     </button>

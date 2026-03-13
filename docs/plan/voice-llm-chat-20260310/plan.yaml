@@ -1,30 +1,26 @@
 plan_id: voice-llm-chat-20260310
 objective: >
-  Build and harden the voice-first LLM chat app:
-  preserve the shipped React + Vite + FastAPI voice pipeline while adding a minimal
-  backend fix for websocket disconnects observed during `llm_response` delivery by
-  suppressing `<think>...</think>` blocks before send, preserving normal unicode
-  output, and adding focused backend regression coverage.
+  Preserve the shipped voice-first LLM chat app and completed backend hardening work while
+  adding a follow-up frontend UX update: the speak control becomes a toggle button
+  that starts recording on first press and stops/sends on second press, with focused
+  frontend regression coverage and no websocket protocol change.
 created_at: "2026-03-10"
 created_by: gem-team/gem-planner
 status: completed
 research_confidence: high
 
 tldr: |
-  13 atomic tasks in 6 waves deliver and harden the local voice→LLM pipeline:
-    Wave 1 (task-001)                    – repo skeleton (monorepo layout, Makefile, env.example, .gitignore)
-    Wave 2 (task-002, task-006)          – backend and frontend scaffolds in parallel
-    Wave 3 (task-003, task-004, task-007)– backend services (Whisper + LM client) and frontend state machine, in parallel
-    Wave 4 (task-005, task-008, task-009)– WebSocket endpoint wired to services; UI components; App assembly
-    Wave 5 (task-010, task-011)          – smoke validation + README
-    Wave 6 (task-012, task-013)          – backend reply sanitization + websocket send-race regression coverage
-  Key design choices: uv for Python env; Vite proxy eliminates CORS; useReducer state machine;
-  Whisper loaded once via FastAPI lifespan; run_in_executor for sync transcription.
-  Bugfix wave scope stays backend-first: strip `<think>...</think>` blocks before `llm_response`,
-  keep `ensure_ascii=False` unicode delivery unchanged, and avoid frontend work unless tests prove it is needed.
+  Existing waves task-001 through task-013 remain completed and preserved.
+  Follow-up Wave 7 is now complete: task-014 delivered the speak control toggle-button
+  UX so first press starts recording and second press stops/sends while keeping the
+  current reducer, hook, and websocket start/stop contract intact.
+  The narrow frontend follow-up scope is finished, including App/BottomBar/MicButton
+  interaction wiring, phase-safe audio-hook guards, copy/ARIA updates, and focused
+  frontend tests for the toggle behavior.
 
 open_questions:
-  - If future client telemetry exposes a repeatable browser close code or proxy involvement, decide whether a follow-up frontend/reconnect task is needed; this wave assumes backend-only changes.
+  - No critical architecture questions; this follow-up wave assumes the existing websocket
+    `start`/`stop` control messages and reducer phases remain the contract.
 
 pre_mortem:
   overall_risk_level: medium
@@ -72,6 +68,14 @@ pre_mortem:
         Keep the existing `json.dumps(..., ensure_ascii=False)` send path unchanged and add
         regression coverage for large sanitized unicode replies plus disconnect-during-send behavior.
 
+    - scenario: Toggle interactions fire duplicate start/stop calls and leave the UI stuck in recording or processing
+      likelihood: medium
+      impact: medium
+      mitigation: >
+        Route all mic presses through a single phase-aware toggle handler in App, keep
+        useAudioStream start/stop behavior idempotent, and add focused frontend tests for
+        click/tap and keyboard toggle flows.
+
   assumptions:
     - Developer has Python 3.11+, Node.js 20+, pnpm, uv, and git installed locally.
     - LM Studio is installed separately and a model is already loaded before running validation.
@@ -80,7 +84,8 @@ pre_mortem:
     - Audio is captured as PCM Int16 at 16 kHz mono by the frontend AudioWorklet.
     - Whisper "base" model (~74 M params) is sufficient for dev; env var allows override.
     - The observed websocket failure is caused by a peer/client close during send, not by unicode or a 5.6 KB payload size.
-    - No frontend code change is required unless backend regression tests uncover a browser-side lifecycle defect.
+    - Frontend follow-up scope is limited to toggle recording UX; the backend websocket
+      start/stop contract remains unchanged.
 
 implementation_specification:
   code_structure: |
@@ -140,7 +145,9 @@ implementation_specification:
     - Repo root (Makefile, .gitignore, .env.example, README.md, scripts/)
     - backend/ (full Python service: FastAPI, Whisper, LM Studio client)
     - backend/app/ws/audio.py and backend/tests/test_ws_audio.py for websocket reply sanitization and send-race regression coverage
-    - frontend/ remains unchanged unless backend regression evidence proves a client lifecycle gap
+    - frontend/src/App.tsx, frontend/src/components/BottomBar.tsx, and frontend/src/components/MicButton.tsx for toggle interaction wiring
+    - frontend/src/hooks/useAudioStream.ts and frontend/src/store/chatReducer.ts for phase-safe recording lifecycle guards and interaction copy updates
+    - frontend test files covering toggle click/tap and keyboard accessibility flows
 
   component_details:
     - component: backend/app/core/config.py
@@ -183,6 +190,7 @@ implementation_specification:
       responsibility: >
         useReducer state machine: Phase (idle | requesting-mic | recording |
         processing | responding | error) × WsStatus × messages[] × transcript.
+        Reused for the toggle-button follow-up without adding new backend-facing phases.
       interfaces:
         - "type Phase"
         - "type ChatState"
@@ -192,7 +200,8 @@ implementation_specification:
       responsibility: >
         getUserMedia → AudioContext (16 kHz) → AudioWorkletNode capturing PCM Int16
         chunks → sends binary frames over WebSocket ref. Sends JSON "start"/"stop"
-        control events.
+        control events and keeps start/stop paths safe when the mic button is used as a
+        toggle instead of press-and-hold.
       interfaces:
         - "useAudioStream(wsRef, dispatch): { startRecording, stopRecording, analyserRef }"
 
@@ -214,7 +223,8 @@ implementation_specification:
       responsibility: >
         Pure-ish presentation components. TopBar (ws status), ChatThread + MessageBubble
         (message history), WaveformBar (canvas waveform), BottomBar + MicButton (controls),
-        StatusOverlay (transcribing/thinking states). All styled with cyberpunk tokens.
+        StatusOverlay (transcribing/thinking states). MicButton now presents a toggle
+        interaction for start/stop recording while keeping cyberpunk tokens and accessibility.
       interfaces:
         - Props interfaces only; no internal I/O logic.
 
@@ -224,7 +234,7 @@ implementation_specification:
     - component: backend/app/main.py
       relationship: registers ws router; lifespan calls transcriber.load_model() and stores on app.state
     - component: frontend/src/App.tsx
-      relationship: composes useWebSocket + useAudioStream + useWaveform; passes state/dispatch to components
+      relationship: composes useWebSocket + useAudioStream + useWaveform; routes a phase-aware mic toggle into components
 
   integration_points:
     - "WebSocket ws://localhost:5173/ws/audio in dev (Vite proxy → localhost:8000/ws/audio)"
@@ -232,6 +242,7 @@ implementation_specification:
     - ".env.example documents VITE_WS_URL, VITE_APP_TITLE, LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL"
     - "scripts/dev.sh runs `uv run uvicorn` and `pnpm dev` concurrently via & wait or npx concurrently"
     - "Backend /healthz GET endpoint for readiness check (used by smoke test and README instructions)"
+    - "Mic control keeps the existing websocket `start` / `stop` events; only the frontend trigger changes from press-and-hold to toggle"
     - "Backend `llm_response` delivery remains UTF-8 JSON with `ensure_ascii=False`; only `<think>...</think>` sections are suppressed before send"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -917,3 +928,57 @@ tasks:
         likelihood: medium
         impact: medium
         mitigation: Inject or stub the send path so the close occurs exactly when `llm_response` is emitted instead of relying on timing
+
+
+  - id: task-014
+    title: Frontend — toggle speak button interaction
+    description: |
+      Deliver the follow-up frontend UX update so the speak control behaves as a
+      start/stop toggle instead of push-to-talk:
+        - Update App.tsx and BottomBar/MicButton prop contracts so a single click/tap
+          dispatches the correct action by phase: idle/responding/error → startRecording,
+          recording → stopRecording, while requesting-mic/processing remains disabled
+        - Keep the existing reducer phase model and websocket `start`/`stop` protocol,
+          but refresh reducer comments/copy so the interaction contract no longer refers
+          to hold-to-speak behavior
+        - Make useAudioStream start/stop calls phase-safe and idempotent so rapid repeat
+          taps or duplicate DOM events do not leak media resources or emit duplicate stop
+          events
+        - Add focused frontend regression coverage for click/tap and keyboard toggle
+          flows, including aria-label/pressed state updates and the transition from
+          recording to processing after the stop press
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-009
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: small
+    estimated_files: 6
+    estimated_lines: 180
+    focus_area: frontend-toggle-recording
+    verification:
+      - "One click/tap from idle starts recording; the next click/tap stops recording and advances to processing"
+      - "Space/Enter keyboard activation follows the same toggle contract without requiring key-hold semantics"
+      - "Frontend tests cover duplicate-event guards so toggle interactions do not emit repeated start/stop side effects"
+    acceptance_criteria:
+      - The speak control is no longer implemented or labeled as hold-to-speak anywhere in the user-visible flow
+      - Recording can be started and stopped with the same button on pointer and keyboard input paths
+      - The frontend test suite includes coverage for toggle interaction state and accessibility copy
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - React
+      - TypeScript
+      - Vitest
+      - Testing Library
+      - Web Audio API
+    test_coverage: "frontend toggle interaction tests for App/MicButton and any affected reducer or hook guards"
+    failure_modes:
+      - scenario: Pointer click, key events, or rapid double-taps trigger duplicate start/stop side effects and leave the app in the wrong phase
+        likelihood: medium
+        impact: high
+        mitigation: Route interaction through a single phase-aware toggle handler and assert idempotent start/stop behavior in focused frontend tests
