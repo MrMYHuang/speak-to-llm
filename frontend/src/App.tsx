@@ -1,4 +1,4 @@
-import { useCallback, useReducer } from 'react'
+import { useCallback, useEffect, useReducer } from 'react'
 import { chatReducer, initialState } from '@/store/chatReducer'
 import { useWebSocket } from '@/hooks/useWebSocket'
 import { useAudioStream } from '@/hooks/useAudioStream'
@@ -13,6 +13,42 @@ const WS_URL = import.meta.env.VITE_WS_URL ?? '/ws/audio'
 // AudioWorklet and getUserMedia require a secure context.
 const isInsecureRemote =
   !window.isSecureContext && location.hostname !== 'localhost'
+
+function getEventTargetElement(target: EventTarget | null): Element | null {
+  if (target instanceof Element) {
+    return target
+  }
+
+  if (target instanceof Node) {
+    return target.parentElement
+  }
+
+  return null
+}
+
+function shouldIgnoreGlobalSpaceShortcut(target: EventTarget | null): boolean {
+  let element = getEventTargetElement(target)
+
+  while (element) {
+    if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement ||
+      element instanceof HTMLSelectElement ||
+      element instanceof HTMLButtonElement ||
+      element instanceof HTMLAnchorElement ||
+      (element instanceof HTMLElement && element.isContentEditable) ||
+      element.getAttribute('contenteditable') === '' ||
+      element.getAttribute('contenteditable') === 'true' ||
+      element.getAttribute('contenteditable') === 'plaintext-only'
+    ) {
+      return true
+    }
+
+    element = element.parentElement
+  }
+
+  return false
+}
 
 export default function App() {
   const [state, dispatch] = useReducer(chatReducer, initialState)
@@ -30,7 +66,7 @@ export default function App() {
   const handleMicToggle = useCallback(() => {
     if (captureState !== 'idle') {
       stopRecording()
-      return
+      return true
     }
 
     switch (state.phase) {
@@ -38,14 +74,36 @@ export default function App() {
       case 'responding':
       case 'error':
         void startRecording()
-        return
+        return true
       case 'recording':
         stopRecording()
-        return
+        return true
       default:
-        return
+        return false
     }
   }, [captureState, state.phase, startRecording, stopRecording])
+
+  useEffect(() => {
+    const handleWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== ' ' || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return
+      }
+
+      if (event.repeat || event.defaultPrevented || shouldIgnoreGlobalSpaceShortcut(event.target)) {
+        return
+      }
+
+      if (handleMicToggle()) {
+        event.preventDefault()
+      }
+    }
+
+    window.addEventListener('keydown', handleWindowKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleWindowKeyDown)
+    }
+  }, [handleMicToggle])
 
   return (
     <div className="flex h-full flex-col bg-bg text-cp-text">

@@ -1,26 +1,27 @@
 plan_id: voice-llm-chat-20260310
 objective: >
   Preserve the shipped voice-first LLM chat app and completed backend hardening work while
-  adding a follow-up frontend UX update: the speak control becomes a toggle button
-  that starts recording on first press and stops/sends on second press, with focused
-  frontend regression coverage and no websocket protocol change.
+  adding a follow-up execution wave: expose assistant `<think>` text to the client for
+  collapsible cyberpunk-green 14pt rendering and allow the speak / stop toggle to be
+  triggered by the Space key without changing the websocket message shape.
 created_at: "2026-03-10"
 created_by: gem-team/gem-planner
 status: completed
 research_confidence: high
 
 tldr: |
-  Existing waves task-001 through task-013 remain completed and preserved.
-  Follow-up Wave 7 is now complete: task-014 delivered the speak control toggle-button
-  UX so first press starts recording and second press stops/sends while keeping the
-  current reducer, hook, and websocket start/stop contract intact.
-  The narrow frontend follow-up scope is finished, including App/BottomBar/MicButton
-  interaction wiring, phase-safe audio-hook guards, copy/ARIA updates, and focused
-  frontend tests for the toggle behavior.
+  Existing waves task-001 through task-014 remain completed and preserved.
+  Follow-up Wave 8 is planned: task-015 through task-018 add raw `<think>` delivery to
+  the live client path, collapsible 14pt neon-green think-block rendering, and a guarded
+  page-level Space shortcut that reuses the existing speak / stop toggle contract.
+  The execution assumption for keyboard handling is that focused button Enter/Space keeps
+  native semantics, while an unfocused Space press triggers the mic toggle only when the
+  event target is not an editable or interactive control.
 
 open_questions:
-  - No critical architecture questions; this follow-up wave assumes the existing websocket
-    `start`/`stop` control messages and reducer phases remain the contract.
+  - If a future text input or prompt editor is added, the global Space shortcut should be
+    disabled while that control is focused; this wave assumes no such editable control is
+    currently present, so implementation can proceed without blocking.
 
 pre_mortem:
   overall_risk_level: medium
@@ -75,6 +76,28 @@ pre_mortem:
         Route all mic presses through a single phase-aware toggle handler in App, keep
         useAudioStream start/stop behavior idempotent, and add focused frontend tests for
         click/tap and keyboard toggle flows.
+    - scenario: Raw `<think>` text is reintroduced to the websocket reply path but also leaks into persisted assistant history or breaks disconnect handling expectations
+      likelihood: medium
+      impact: high
+      mitigation: >
+        Keep a dual-path reply flow in `backend/app/ws/audio.py`: send raw LLM text to the
+        client, persist only the sanitized assistant text, and update backend tests to
+        assert both outbound and stored-history behavior under normal and disconnect cases.
+    - scenario: Think blocks inherit the assistant bubble typography or become inaccessible because collapse state is rendered as plain text spans instead of an interactive control
+      likelihood: medium
+      impact: medium
+      mitigation: >
+        Render each think segment through a dedicated interactive affordance with explicit
+        14pt neon-green styling, collapsed-by-default state, and focused frontend tests for
+        click/keyboard expansion state and visible body typography.
+    - scenario: A global Space shortcut scrolls the page, hijacks future editable controls, or double-fires alongside native focused button activation
+      likelihood: medium
+      impact: high
+      mitigation: >
+        Reuse `handleMicToggle` from an App-owned key handler that ignores editable and
+        interactive targets, skips modified key presses, relies on native button behavior
+        when the mic button already owns focus, and only calls `preventDefault()` when the
+        shortcut is actually handled.
 
   assumptions:
     - Developer has Python 3.11+, Node.js 20+, pnpm, uv, and git installed locally.
@@ -84,8 +107,15 @@ pre_mortem:
     - Audio is captured as PCM Int16 at 16 kHz mono by the frontend AudioWorklet.
     - Whisper "base" model (~74 M params) is sufficient for dev; env var allows override.
     - The observed websocket failure is caused by a peer/client close during send, not by unicode or a 5.6 KB payload size.
-    - Frontend follow-up scope is limited to toggle recording UX; the backend websocket
-      start/stop contract remains unchanged.
+    - 'The backend websocket message shape remains `{ type: "llm_response", text: string }`
+      even when `text` now contains raw `<think>` tags for the live client render path.'
+    - Page-level Space activation means an App-owned global shortcut when focus is outside
+      buttons, links, inputs, textareas, selects, or contenteditable regions; focused mic
+      button activation continues to use native browser semantics.
+    - Think text should be visible in the frontend only; persisted assistant conversation
+      history remains sanitized so prior backend safety guarantees still hold.
+    - Frontend follow-up scope now includes think-block rendering plus guarded keyboard
+      activation while keeping the backend websocket `start` / `stop` control contract unchanged.
 
 implementation_specification:
   code_structure: |
@@ -144,10 +174,11 @@ implementation_specification:
   affected_areas:
     - Repo root (Makefile, .gitignore, .env.example, README.md, scripts/)
     - backend/ (full Python service: FastAPI, Whisper, LM Studio client)
-    - backend/app/ws/audio.py and backend/tests/test_ws_audio.py for websocket reply sanitization and send-race regression coverage
-    - frontend/src/App.tsx, frontend/src/components/BottomBar.tsx, and frontend/src/components/MicButton.tsx for toggle interaction wiring
-    - frontend/src/hooks/useAudioStream.ts and frontend/src/store/chatReducer.ts for phase-safe recording lifecycle guards and interaction copy updates
-    - frontend test files covering toggle click/tap and keyboard accessibility flows
+    - backend/app/ws/audio.py and backend/tests/test_ws_audio.py for dual-path think-tag delivery, sanitized history persistence, and send-race regression coverage
+    - frontend/src/types/ws.ts, frontend/src/hooks/useWebSocket.ts, and frontend/src/store/chatReducer.ts for preserving tagged assistant text without changing the websocket envelope
+    - frontend/src/utils/assistantMessage.ts and frontend/src/components/MessageBubble.tsx for collapsible 14pt neon-green think-block parsing and presentation
+    - frontend/src/App.tsx, frontend/src/components/BottomBar.tsx, frontend/src/components/MicButton.tsx, and any small App-owned keyboard shortcut hook for guarded Space-key triggering
+    - frontend test files covering toggle click/tap, global Space-key behavior, and think-block expand/collapse rendering
 
   component_details:
     - component: backend/app/core/config.py
@@ -178,10 +209,9 @@ implementation_specification:
       responsibility: >
         WebSocket endpoint at /ws/audio. Implements server-side state machine:
         IDLE → BUFFERING (on "start" event) → TRANSCRIBING (on "stop" event)
-        → LLM_CALLING → IDLE. Sanitizes assistant replies by suppressing
-        `<think>...</think>` blocks before conversation-history persistence and
-        `llm_response` delivery, while preserving normal unicode JSON payloads and
-        existing disconnect handling.
+        → LLM_CALLING → IDLE. Sends raw assistant text, including `<think>` tags, to the
+        live `llm_response` client path while still sanitizing persisted assistant history
+        and preserving normal unicode JSON payloads plus existing disconnect handling.
       interfaces:
         - "@router.websocket('/ws/audio') async def ws_audio_endpoint(ws, app)"
         - "def sanitize_llm_reply(text: str) -> str"
@@ -190,7 +220,8 @@ implementation_specification:
       responsibility: >
         useReducer state machine: Phase (idle | requesting-mic | recording |
         processing | responding | error) × WsStatus × messages[] × transcript.
-        Reused for the toggle-button follow-up without adding new backend-facing phases.
+        Preserves assistant `text` as the raw websocket payload so think tags can be
+        rendered client-side without adding new backend-facing phases.
       interfaces:
         - "type Phase"
         - "type ChatState"
@@ -219,22 +250,48 @@ implementation_specification:
       interfaces:
         - "useWaveform(analyserRef): { amplitudes: Float32Array }"
 
+    - component: frontend/src/App.tsx
+      responsibility: >
+        Orchestrates reducer state, websocket/audio hooks, and the single mic toggle entry
+        point. Owns the guarded page-level Space shortcut so keyboard activation reuses the
+        same phase-aware `handleMicToggle` semantics as pointer input.
+      interfaces:
+        - "handleMicToggle(): void"
+
+    - component: frontend/src/utils/assistantMessage.ts
+      responsibility: >
+        Splits assistant message strings into ordered visible-text and think segments,
+        including support for open-ended `<think>` content that should render until the end
+        of the message when no closing tag is present.
+      interfaces:
+        - "splitAssistantMessage(text: string): AssistantMessageSegment[]"
+
+    - component: frontend/src/components/MessageBubble.tsx
+      responsibility: >
+        Renders assistant visible text plus dedicated collapsible think blocks. Think blocks
+        default to collapsed, expand/collapse on click, and use cyberpunk neon-green 14pt
+        styling without inheriting the assistant bubble's larger typography.
+      interfaces:
+        - "MessageBubble({ message }: MessageBubbleProps)"
+
     - component: frontend/src/components/* (UI layer)
       responsibility: >
         Pure-ish presentation components. TopBar (ws status), ChatThread + MessageBubble
         (message history), WaveformBar (canvas waveform), BottomBar + MicButton (controls),
-        StatusOverlay (transcribing/thinking states). MicButton now presents a toggle
+        StatusOverlay (transcribing/thinking states). MicButton presents a toggle
         interaction for start/stop recording while keeping cyberpunk tokens and accessibility.
       interfaces:
         - Props interfaces only; no internal I/O logic.
 
   dependencies:
     - component: backend/app/ws/audio.py
-      relationship: calls transcriber.transcribe() and llm_client.chat() sequentially per utterance, then sanitizes assistant text before persisting and sending it
+      relationship: calls transcriber.transcribe() and llm_client.chat() sequentially per utterance, then sends raw assistant text to the client while sanitizing only persisted assistant history
     - component: backend/app/main.py
       relationship: registers ws router; lifespan calls transcriber.load_model() and stores on app.state
     - component: frontend/src/App.tsx
-      relationship: composes useWebSocket + useAudioStream + useWaveform; routes a phase-aware mic toggle into components
+      relationship: composes useWebSocket + useAudioStream + useWaveform; routes a phase-aware mic toggle into components and owns the guarded global Space shortcut
+    - component: frontend/src/components/MessageBubble.tsx
+      relationship: depends on assistantMessage.ts segment parsing and local collapse state to render think blocks independently from the stored message text
 
   integration_points:
     - "WebSocket ws://localhost:5173/ws/audio in dev (Vite proxy → localhost:8000/ws/audio)"
@@ -242,8 +299,10 @@ implementation_specification:
     - ".env.example documents VITE_WS_URL, VITE_APP_TITLE, LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL"
     - "scripts/dev.sh runs `uv run uvicorn` and `pnpm dev` concurrently via & wait or npx concurrently"
     - "Backend /healthz GET endpoint for readiness check (used by smoke test and README instructions)"
-    - "Mic control keeps the existing websocket `start` / `stop` events; only the frontend trigger changes from press-and-hold to toggle"
-    - "Backend `llm_response` delivery remains UTF-8 JSON with `ensure_ascii=False`; only `<think>...</think>` sections are suppressed before send"
+    - "Mic control keeps the existing websocket `start` / `stop` events; keyboard and pointer paths both reuse the same frontend toggle handler"
+    - "Backend `llm_response` delivery remains UTF-8 JSON with `ensure_ascii=False` and the same `{type,text}` envelope; only persisted assistant history stays sanitized"
+    - "Assistant rendering continues to split `llm_response.text` client-side, but think segments now render as collapsible neon-green 14pt blocks rather than inheriting bubble typography"
+    - "App-level key handling intercepts unfocused Space presses only when no editable or interactive element owns the event target, preventing page scroll for handled toggles"
 
 # ──────────────────────────────────────────────────────────────────────────────
 tasks:
@@ -832,6 +891,11 @@ tasks:
     acceptance_criteria:
       - README is self-contained; no external wiki page needed for local setup
       - Whisper model pre-download step is clearly called out before `make dev`
+    failure_modes:
+      - scenario: README omits a prerequisite or Whisper pre-download step, causing a fresh developer setup to fail before the app starts
+        likelihood: medium
+        impact: medium
+        mitigation: Mirror the verified local bootstrap sequence from task-010 and include a troubleshooting entry for first-run model download and LM Studio availability
     requires_review: false
     audience: developers
     coverage_matrix:
@@ -982,3 +1046,215 @@ tasks:
         likelihood: medium
         impact: high
         mitigation: Route interaction through a single phase-aware toggle handler and assert idempotent start/stop behavior in focused frontend tests
+
+  - id: task-015
+    title: Backend — deliver think-tag text to the live client path
+    description: |
+      Update the websocket reply pipeline so assistant `<think>` text reaches the frontend
+      without regressing sanitized history persistence:
+        - Keep `backend/app/ws/audio.py` on the existing `{type: "llm_response", text: string}`
+          message shape, but send the raw LLM reply text to the live client path instead of
+          stripping think blocks before emit
+        - Continue sanitizing assistant text before conversation-history persistence so the
+          backend does not retain hidden reasoning in stored history
+        - Preserve disconnect logging and unicode behavior on the send path, including cases
+          where a reply contains complete or open-ended `<think>` tags
+        - Update backend websocket tests that currently assert think stripping so they now
+          distinguish outbound raw delivery from sanitized persistence expectations
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-013
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_think_pipeline: docs/plan/voice-llm-chat-20260310/research_findings_frontend-backend-think-tag-rendering-pipeline.yaml
+      research_findings_bug: docs/plan/voice-llm-chat-20260310/research_findings_websocket-disconnect-bug.yaml
+    estimated_effort: medium
+    estimated_files: 2
+    estimated_lines: 140
+    focus_area: backend-think-delivery
+    verification:
+      - "A websocket reply containing `<think>draft</think>visible` arrives at the client with the tagged text still present in `llm_response.text`"
+      - "Persisted assistant history remains sanitized even when the outbound websocket payload includes think tags"
+      - "Disconnect and unicode regression tests still pass when the raw outbound payload includes think content"
+    acceptance_criteria:
+      - The frontend receives raw think-tagged assistant text on the live websocket path without any message-schema change
+      - Backend conversation history never stores the hidden think text
+      - Backend tests make the dual-path contract explicit: raw outbound delivery, sanitized persistence
+    requires_review: true
+    review_depth: standard
+    security_sensitive: true
+    tech_stack:
+      - Python
+      - FastAPI WebSocket
+      - pytest
+    test_coverage: "backend/tests/test_ws_audio.py: raw think-tag outbound delivery, sanitized persistence, disconnect/unicode regressions"
+    failure_modes:
+      - scenario: Raw reply delivery accidentally reuses the persisted sanitized string, so the frontend never receives think content
+        likelihood: medium
+        impact: high
+        mitigation: Separate `raw_reply` and `sanitized_reply` variables in the websocket handler and assert both values in backend tests
+      - scenario: Persisted assistant history starts storing think text because the sanitation step is moved after history append
+        likelihood: medium
+        impact: high
+        mitigation: Keep history append on the sanitized value only and add an explicit regression assertion for stored conversation history
+
+  - id: task-016
+    title: Frontend — render collapsible think blocks
+    description: |
+      Deliver the assistant-message UI update for visible think content:
+        - Extend `frontend/src/utils/assistantMessage.ts` so it can split both closed and
+          open-ended `<think>` regions into ordered segments without changing the stored
+          assistant message contract
+        - Update `frontend/src/components/MessageBubble.tsx` to render think segments as
+          dedicated collapsed-by-default blocks that expand/collapse on click and use
+          cyberpunk neon-green 14pt typography instead of inheriting the 20pt assistant body
+        - Keep non-think assistant text rendering unchanged and preserve message ordering,
+          whitespace, and glow styling expectations for normal content
+        - Add focused frontend tests for collapsed/expanded state, mixed text+think replies,
+          and open-ended `<think>` content that reaches the client without a closing tag
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-015
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_think_pipeline: docs/plan/voice-llm-chat-20260310/research_findings_frontend-backend-think-tag-rendering-pipeline.yaml
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 180
+    focus_area: frontend-think-rendering
+    verification:
+      - "Assistant think content renders in neon-green styling at 14pt and is collapsed by default"
+      - "Mouse click toggles each think block between collapsed and expanded states without altering adjacent visible assistant text"
+      - "Frontend tests cover mixed-content replies and open-ended `<think>` parsing/rendering"
+    acceptance_criteria:
+      - Think content is visually distinct from the main assistant bubble body and no longer inherits 20pt typography
+      - Users can expand and collapse each think block from the rendered transcript with a click
+      - Existing visible assistant text remains readable and correctly ordered around think blocks
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - React
+      - TypeScript
+      - Vitest
+      - Testing Library
+    test_coverage: "frontend think-block tests for assistantMessage parsing and MessageBubble collapse/expand rendering"
+    failure_modes:
+      - scenario: Open-ended `<think>` text is dropped or merged into visible assistant content because the parser only handles closed tags
+        likelihood: medium
+        impact: high
+        mitigation: Update parser coverage to explicitly support incomplete trailing `<think>` blocks and add regression tests for that shape
+      - scenario: The collapse affordance is implemented as a non-interactive span, making state changes undiscoverable or inaccessible
+        likelihood: medium
+        impact: medium
+        mitigation: Use an interactive control with explicit expanded/collapsed state labeling and verify it with component tests
+
+  - id: task-017
+    title: Frontend — add guarded Space-key mic toggle
+    description: |
+      Add the requested keyboard shortcut without breaking existing button semantics:
+        - Implement an App-owned global Space handler (or a tiny App-owned hook) that reuses
+          `handleMicToggle` for page-level activation when the user is not focused inside an
+          interactive or editable control
+        - Preserve native focused button Enter/Space behavior for the existing mic button, so
+          the shortcut does not double-fire when the control already owns focus
+        - Prevent page scrolling only when the shortcut is actually handled, and ignore
+          modified keys plus future editable targets such as inputs, textareas, selects,
+          buttons, links, and contenteditable regions
+        - Add focused frontend tests covering unfocused Space start/stop behavior, ignored
+          editable targets, and the existing focused button keyboard path
+    agent: gem-team/gem-implementer
+    priority: medium
+    status: done
+    dependencies:
+      - task-014
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_keyboard: docs/plan/voice-llm-chat-20260310/research_findings_frontend_keyboard_interaction_and_speak_toggle_controls.yaml
+      research_findings_frontend: docs/plan/voice-llm-chat-20260310/research_findings_frontend-ui-architecture.yaml
+    estimated_effort: small
+    estimated_files: 3
+    estimated_lines: 120
+    focus_area: frontend-keyboard-shortcut
+    verification:
+      - "Pressing Space with no interactive control focused starts recording from idle and stops recording on the next press"
+      - "Focused mic button Enter/Space activation continues to work through native button semantics without duplicate toggle calls"
+      - "Space presses inside editable or interactive controls are ignored and do not trigger the mic toggle or page-scroll prevention"
+    acceptance_criteria:
+      - Users can trigger speak / stop with the Space key anywhere on the page under the plan's guarded-focus assumption
+      - The shortcut does not interfere with current focused-button accessibility behavior
+      - Tests document the chosen shortcut contract so future editable controls can extend the guard list safely
+    requires_review: false
+    tech_stack:
+      - React
+      - TypeScript
+      - Vitest
+      - Testing Library
+    test_coverage: "frontend App toggle tests for unfocused Space shortcut, ignored editable targets, and native focused button behavior"
+    failure_modes:
+      - scenario: Space handling fires both the global shortcut and the focused button's native click, causing duplicate start/stop actions
+        likelihood: medium
+        impact: high
+        mitigation: Short-circuit the global handler when the mic button or any interactive element already owns focus and keep a duplicate-trigger regression test
+
+  - id: task-018
+    title: Validation — verify think-block and Space-key UX
+    description: |
+      Validate the follow-up wave from an end-user perspective after implementation lands:
+        - Exercise the full flow from recording through transcript and assistant response when
+          the LLM emits visible text plus `<think>` text
+        - Confirm think blocks stay collapsed by default, expand/collapse on click, and retain
+          neon-green 14pt styling in the rendered chat thread
+        - Confirm the global Space shortcut starts/stops recording under the guarded-focus
+          assumption and is ignored for editable/interactive targets
+        - Capture any regressions around websocket reconnect, scroll behavior, or mixed
+          pointer/keyboard interaction sequences before the wave is marked complete
+    agent: gem-team/gem-browser-tester
+    priority: medium
+    status: done
+    dependencies:
+      - task-016
+      - task-017
+    context_files:
+      existing_plan: docs/plan/voice-llm-chat-20260310/plan.yaml
+      research_findings_think_pipeline: docs/plan/voice-llm-chat-20260310/research_findings_frontend-backend-think-tag-rendering-pipeline.yaml
+      research_findings_keyboard: docs/plan/voice-llm-chat-20260310/research_findings_frontend_keyboard_interaction_and_speak_toggle_controls.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 80
+    focus_area: follow-up-wave-validation
+    verification:
+      - "Manual or automated browser validation confirms the click-to-expand think block UX and guarded Space shortcut across the main happy path"
+      - "Observed behavior matches the documented assumptions for collapsed think blocks and ignored editable targets"
+    acceptance_criteria:
+      - The new follow-up wave has a concrete validation record for both think rendering and Space-key activation
+      - No blocker regressions remain in the main chat interaction path after the frontend and backend changes land
+    failure_modes:
+      - scenario: Validation only checks the happy path and misses a duplicate-trigger or collapsed-state regression introduced by mixed pointer/keyboard usage
+        likelihood: medium
+        impact: medium
+        mitigation: Include explicit validation scenarios for click expand/collapse, unfocused Space activation, and ignored interactive targets before marking the wave complete
+    requires_review: false
+    validation_matrix:
+      - scenario: think-tagged assistant reply in normal chat flow
+        steps:
+          - Start a recording and submit audio that yields an assistant response containing visible text plus `<think>` content
+          - Observe the assistant message when it first renders in the chat thread
+          - Click the think-block affordance to expand and collapse it
+        expected_result: Think content is collapsed by default, styled neon green at 14pt when revealed, and does not disturb visible assistant text ordering
+      - scenario: page-level Space shortcut
+        steps:
+          - Ensure no interactive control is focused
+          - Press Space once to start recording
+          - Press Space again to stop and send audio
+        expected_result: The same speak / stop toggle flow runs without page scrolling or duplicate actions
+      - scenario: ignored editable target
+        steps:
+          - Focus an editable or interactive control used in the validation harness
+          - Press Space while that control remains focused
+        expected_result: The mic toggle does not fire and the control retains normal keyboard behavior

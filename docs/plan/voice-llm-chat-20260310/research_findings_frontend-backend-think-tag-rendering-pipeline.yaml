@@ -1,0 +1,364 @@
+plan_id: voice-llm-chat-20260310
+objective: "Trace the current frontend/backend pipeline for assistant response rendering, with emphasis on <think> tag handling and change surfaces for collapsible think-block display."
+focus_area: frontend/backend think-tag rendering pipeline
+created_at: "2026-03-13T00:00:00Z"
+created_by: GitHub Copilot
+status: completed
+
+tldr: |
+  - Backend websocket handling sanitizes LLM replies before emitting `llm_response`, removing `<think>...</think>` blocks and truncating open-ended `<think` content, so raw think text is currently unavailable to the frontend on the live `/ws/audio` path.
+  - Frontend still contains a think-tag parsing/rendering path: assistant messages are stored as plain `text`, `MessageBubble` calls `splitAssistantMessage`, and `think` segments render neon green, but only if raw tags are already present in `message.text`.
+  - Primary pipeline files are `backend/app/ws/audio.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/store/chatReducer.ts`, `frontend/src/components/MessageBubble.tsx`, and `frontend/src/utils/assistantMessage.ts`; existing tests cover backend sanitization and frontend parsing separately, not end-to-end.
+  - Current think styling inherits the assistant bubble's 20pt text size; there is no collapse/expand state, click handling, accessibility affordance, or dedicated test coverage for interactive think-block UI.
+
+research_metadata:
+  methodology: "Repository inspection using ripgrep for `<think>` and message-pipeline symbols, targeted file reads of websocket, reducer, rendering, parser, styles, and tests, and relationship tracing from backend LLM reply generation through frontend websocket parsing and message rendering."
+  tools_used:
+    - rg
+    - glob
+    - view
+    - bash
+  scope: "Focused on `/ws/audio` backend reply flow, frontend websocket consumption, message state, assistant rendering, think-tag parsing, styles, and related tests."
+  confidence: high
+  coverage: 90
+
+files_analyzed:
+  - file: audio.py
+    path: backend/app/ws/audio.py
+    purpose: Handles `/ws/audio` websocket session state, transcription, LLM calls, reply sanitization, websocket emission, and conversation history persistence.
+    key_elements:
+      - element: sanitize_llm_reply
+        type: function
+        location: backend/app/ws/audio.py:28-35
+        description: Removes complete `<think>...</think>` blocks case-insensitively and truncates remaining output from the first open `<think` onward.
+      - element: llm_response send path
+        type: pattern
+        location: backend/app/ws/audio.py:146-186
+        description: Calls LLM, sanitizes the reply, appends sanitized assistant text to `conversation_history`, and sends `{"type":"llm_response","text": sanitized_reply}`.
+    language: Python
+    lines: 215
+  - file: llm_client.py
+    path: backend/app/services/llm_client.py
+    purpose: Wraps LM Studio/OpenAI-compatible chat completion call and returns raw assistant text to the websocket layer.
+    key_elements:
+      - element: LLMClient.chat
+        type: function
+        location: backend/app/services/llm_client.py:25-43
+        description: Builds prompt history and returns `response.choices[0].message.content` without sanitization.
+    language: Python
+    lines: 44
+  - file: useWebSocket.ts
+    path: frontend/src/hooks/useWebSocket.ts
+    purpose: Opens the websocket, parses inbound JSON, and dispatches typed server messages into reducer state.
+    key_elements:
+      - element: ws.onmessage dispatch
+        type: pattern
+        location: frontend/src/hooks/useWebSocket.ts:104-115
+        description: Parses text frames with `parseServerMessage` and dispatches `SERVER_MSG` for valid messages.
+    language: TypeScript
+    lines: 172
+  - file: ws.ts
+    path: frontend/src/types/ws.ts
+    purpose: Defines websocket message types and validates raw JSON payloads from the backend.
+    key_elements:
+      - element: ServerMessage llm_response
+        type: pattern
+        location: frontend/src/types/ws.ts:2-6
+        description: Models assistant output as `{ type: 'llm_response'; text: string }` only.
+      - element: parseServerMessage
+        type: function
+        location: frontend/src/types/ws.ts:16-43
+        description: Accepts `llm_response.text` as a plain string and performs no think-tag transform.
+    language: TypeScript
+    lines: 43
+  - file: chatReducer.ts
+    path: frontend/src/store/chatReducer.ts
+    purpose: Stores parsed websocket messages in chat state and appends assistant replies to `messages`.
+    key_elements:
+      - element: Message
+        type: type
+        location: frontend/src/store/chatReducer.ts:37-42
+        description: Message model has only `id`, `role`, `text`, and `timestamp`.
+      - element: SERVER_MSG llm_response branch
+        type: pattern
+        location: frontend/src/store/chatReducer.ts:139-159
+        description: Appends assistant replies as raw `msg.text` strings with no separate think metadata.
+    language: TypeScript
+    lines: 182
+  - file: MessageBubble.tsx
+    path: frontend/src/components/MessageBubble.tsx
+    purpose: Renders each chat message and splits assistant text into text versus think segments for display.
+    key_elements:
+      - element: splitAssistantMessage usage
+        type: pattern
+        location: frontend/src/components/MessageBubble.tsx:8-10
+        description: Calls `splitAssistantMessage(message.text)` for assistant messages only.
+      - element: think segment rendering
+        type: pattern
+        location: frontend/src/components/MessageBubble.tsx:29-38
+        description: Renders each segment in a `span`, applying `text-neon-green cp-text-glow-green` to `think` segments.
+      - element: assistant bubble typography
+        type: pattern
+        location: frontend/src/components/MessageBubble.tsx:15-21
+        description: Bubble container applies `text-[20pt]`, which think spans currently inherit.
+    language: TypeScript React
+    lines: 42
+  - file: assistantMessage.ts
+    path: frontend/src/utils/assistantMessage.ts
+    purpose: Splits assistant message strings into visible text and extracted think segments.
+    key_elements:
+      - element: THINK_TAG_PATTERN
+        type: variable
+        location: frontend/src/utils/assistantMessage.ts:6
+        description: Regex matches exact `<think>...</think>` blocks with global and case-insensitive flags.
+      - element: splitAssistantMessage
+        type: function
+        location: frontend/src/utils/assistantMessage.ts:8-35
+        description: Returns ordered `text` and `think` segments, dropping raw tags from the resulting segment text.
+    language: TypeScript
+    lines: 36
+  - file: ChatThread.tsx
+    path: frontend/src/components/ChatThread.tsx
+    purpose: Iterates stored messages and renders `MessageBubble` for each message in the thread.
+    key_elements:
+      - element: message list render
+        type: pattern
+        location: frontend/src/components/ChatThread.tsx:16-33
+        description: Maps `messages` to `MessageBubble` without additional transformation.
+    language: TypeScript React
+    lines: 35
+  - file: index.css
+    path: frontend/src/styles/index.css
+    purpose: Defines theme tokens and glow utility classes used by assistant message rendering.
+    key_elements:
+      - element: neon green tokens
+        type: pattern
+        location: frontend/src/styles/index.css:14-20
+        description: Defines neon-green color and glow variables.
+      - element: cp-text-glow-green
+        type: pattern
+        location: frontend/src/styles/index.css:55-61
+        description: Provides green text-shadow utility used for think segments.
+    language: CSS
+    lines: 62
+  - file: test_ws_audio.py
+    path: backend/tests/test_ws_audio.py
+    purpose: Exercises websocket state transitions, reply sanitization, history persistence, unicode handling, and disconnect behavior.
+    key_elements:
+      - element: sanitized websocket reply tests
+        type: pattern
+        location: backend/tests/test_ws_audio.py:185-311
+        description: Confirms `<think>` blocks are removed before websocket send and before assistant history persistence.
+      - element: disconnect during llm_response send
+        type: pattern
+        location: backend/tests/test_ws_audio.py:458-501
+        description: Confirms sanitized assistant text is still the outbound payload when disconnect occurs during `llm_response` send.
+    language: Python
+    lines: 510
+  - file: assistantMessage.test.ts
+    path: frontend/src/utils/assistantMessage.test.ts
+    purpose: Verifies parser behavior for messages that already contain think tags on the frontend.
+    key_elements:
+      - element: think-tag extraction tests
+        type: pattern
+        location: frontend/src/utils/assistantMessage.test.ts:5-27
+        description: Confirms `splitAssistantMessage` emits `think` segments and strips raw tags from segment text.
+    language: TypeScript
+    lines: 27
+  - file: ws.test.ts
+    path: frontend/src/types/ws.test.ts
+    purpose: Verifies websocket message parsing for transcript and llm_response payloads, including large unicode replies.
+    key_elements:
+      - element: llm_response parsing tests
+        type: pattern
+        location: frontend/src/types/ws.test.ts:5-31
+        description: Confirms large and unicode `llm_response.text` payloads are parsed as opaque strings.
+    language: TypeScript
+    lines: 32
+
+patterns_found:
+  - category: architecture
+    pattern: Backend sanitizes assistant output before frontend delivery
+    description: Raw LLM output is returned by `LLMClient.chat`, but the websocket layer removes think blocks before sending or storing assistant content.
+    examples:
+      - file: backend/app/services/llm_client.py
+        location: backend/app/services/llm_client.py:25-43
+        snippet: "return response.choices[0].message.content or \"\""
+      - file: backend/app/ws/audio.py
+        location: backend/app/ws/audio.py:166-185
+        snippet: "sanitized_reply = sanitize_llm_reply(reply) ... conversation_history.extend([user_message, {\"role\": \"assistant\", \"content\": sanitized_reply}]) ... await _send({\"type\": \"llm_response\", \"text\": sanitized_reply})"
+    prevalence: common
+  - category: structure
+    pattern: Frontend stores assistant replies as plain strings and derives think rendering at render time
+    description: The reducer preserves only `text` on assistant messages; `MessageBubble` performs the only think-specific transform.
+    examples:
+      - file: frontend/src/store/chatReducer.ts
+        location: frontend/src/store/chatReducer.ts:151-158
+        snippet: "{ id: crypto.randomUUID(), role: 'assistant', text: msg.text, timestamp: Date.now() }"
+      - file: frontend/src/components/MessageBubble.tsx
+        location: frontend/src/components/MessageBubble.tsx:10-10
+        snippet: "const assistantSegments = isUser ? [] : splitAssistantMessage(message.text)"
+    prevalence: common
+  - category: naming
+    pattern: Think content is represented as `kind: 'think'` segments on the frontend
+    description: Parsing and rendering utilities distinguish assistant text from extracted think blocks using a `kind` discriminator.
+    examples:
+      - file: frontend/src/utils/assistantMessage.ts
+        location: frontend/src/utils/assistantMessage.ts:1-3
+        snippet: "export interface AssistantMessageSegment { kind: 'text' | 'think'; text: string }"
+      - file: frontend/src/utils/assistantMessage.ts
+        location: frontend/src/utils/assistantMessage.ts:20-21
+        snippet: "segments.push({ kind: 'think', text: thinkText })"
+    prevalence: occasional
+  - category: testing
+    pattern: Backend and frontend think handling are tested separately, not in one end-to-end path
+    description: Backend tests assert sanitized websocket output, while frontend tests assert parsing of already-tagged strings.
+    examples:
+      - file: backend/tests/test_ws_audio.py
+        location: backend/tests/test_ws_audio.py:236-311
+        snippet: "assert ws.receive_json() == {\"type\": \"llm_response\", \"text\": sanitized_reply}"
+      - file: frontend/src/utils/assistantMessage.test.ts
+        location: frontend/src/utils/assistantMessage.test.ts:12-25
+        snippet: "expect(splitAssistantMessage('Visible <think>internal reasoning</think> more')).toEqual([...])"
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: backend websocket endpoint
+      responsibility: Orchestrates transcription, LLM call, sanitization, websocket sends, and conversation history updates.
+      location: backend/app/ws/audio.py
+      relationship_to_domain: domain source of assistant text delivered to frontend
+    - component: LLM client wrapper
+      responsibility: Fetches raw model output before websocket sanitization.
+      location: backend/app/services/llm_client.py
+      relationship_to_domain: backend websocket depends on this for assistant reply generation
+    - component: websocket hook
+      responsibility: Receives backend JSON frames and dispatches typed messages into frontend state.
+      location: frontend/src/hooks/useWebSocket.ts
+      relationship_to_domain: domain depends on this to ingest `llm_response`
+    - component: chat reducer
+      responsibility: Persists transcript and assistant messages in frontend state.
+      location: frontend/src/store/chatReducer.ts
+      relationship_to_domain: domain stores assistant output as message text
+    - component: message renderer
+      responsibility: Splits assistant text and renders text/think spans.
+      location: frontend/src/components/MessageBubble.tsx
+      relationship_to_domain: this uses domain outputs
+  interfaces_used_by_domain:
+    - interface: ServerMessage
+      location: frontend/src/types/ws.ts:2-6
+      usage_pattern: Typed frontend contract for `transcript`, `llm_response`, `status`, and `error` websocket frames.
+    - interface: Message
+      location: frontend/src/store/chatReducer.ts:37-42
+      usage_pattern: Frontend chat-thread item model with a single `text` field for both user and assistant content.
+    - interface: AssistantMessageSegment
+      location: frontend/src/utils/assistantMessage.ts:1-3
+      usage_pattern: Render-time segmentation contract for assistant text versus think content.
+  data_flow_involving_domain: "LM Studio reply text is produced by `LLMClient.chat` (`backend/app/services/llm_client.py:25-43`), sanitized in `sanitize_llm_reply` and emitted as `llm_response` from `ws_audio` (`backend/app/ws/audio.py:166-185`), parsed by `parseServerMessage` (`frontend/src/types/ws.ts:16-43`), dispatched by `useWebSocket` (`frontend/src/hooks/useWebSocket.ts:104-115`), stored as `message.text` by `chatReducer` (`frontend/src/store/chatReducer.ts:151-158`), then rendered by `ChatThread` and `MessageBubble`, where `splitAssistantMessage` can only extract think blocks if those tags are still present in `message.text` (`frontend/src/components/MessageBubble.tsx:8-38`, `frontend/src/utils/assistantMessage.ts:8-35`)."
+  key_relationships_to_domain:
+    - from: backend/app/ws/audio.py
+      to: backend/app/services/llm_client.py
+      relationship: calls
+    - from: frontend/src/hooks/useWebSocket.ts
+      to: frontend/src/types/ws.ts
+      relationship: calls
+    - from: frontend/src/hooks/useWebSocket.ts
+      to: frontend/src/store/chatReducer.ts
+      relationship: dispatches to
+    - from: frontend/src/components/ChatThread.tsx
+      to: frontend/src/components/MessageBubble.tsx
+      relationship: composes
+    - from: frontend/src/components/MessageBubble.tsx
+      to: frontend/src/utils/assistantMessage.ts
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python
+    - TypeScript
+    - CSS
+  frameworks_used_in_domain:
+    - name: FastAPI
+      usage_in_domain: Websocket endpoint declaration and server lifecycle for `/ws/audio`.
+    - name: React
+      usage_in_domain: Chat thread and message bubble rendering.
+    - name: Tailwind CSS
+      usage_in_domain: Utility-class styling for message bubbles and typography.
+    - name: Vitest
+      usage_in_domain: Frontend unit tests for websocket parsing and assistant-message splitting.
+    - name: pytest
+      usage_in_domain: Backend websocket and sanitization tests.
+  libraries_used_in_domain:
+    - name: openai
+      purpose_in_domain: AsyncOpenAI client for LM Studio-compatible chat completion requests.
+    - name: testing-library
+      purpose_in_domain: UI interaction tests in frontend `App.toggle.test.tsx`.
+  external_apis_used_in_domain:
+    - name: LM Studio OpenAI-compatible chat completions API
+      integration_point: backend/app/services/llm_client.py:20-43
+
+related_conventions:
+  naming_patterns_in_domain: "Websocket event types use explicit string discriminators (`transcript`, `llm_response`, `status`, `error`) in both backend payloads and frontend parsing (`backend/app/ws/audio.py:144-186`, `frontend/src/types/ws.ts:2-43`). Frontend render parsing uses `kind: 'text' | 'think'` as a second discriminator (`frontend/src/utils/assistantMessage.ts:1-35`)."
+  structure_of_domain: "Backend performs transformation before transport; frontend transport/parsing/reducer layers treat assistant text as opaque until `MessageBubble` render time (`backend/app/ws/audio.py:166-185`, `frontend/src/types/ws.ts:16-43`, `frontend/src/store/chatReducer.ts:151-158`, `frontend/src/components/MessageBubble.tsx:8-38`)."
+  error_handling_in_domain: "Backend catches transcription and LLM connection failures and emits `error` websocket messages (`backend/app/ws/audio.py:134-164`). Frontend websocket hook ignores unparseable frames and dispatches `WS_ERROR` on socket errors (`frontend/src/hooks/useWebSocket.ts:104-129`)."
+  testing_in_domain: "Backend tests focus on websocket frame ordering, sanitization, history persistence, unicode, and disconnects (`backend/tests/test_ws_audio.py`). Frontend tests focus on parser correctness and websocket-message parsing rather than assistant-rendering interactions (`frontend/src/utils/assistantMessage.test.ts`, `frontend/src/types/ws.test.ts`)."
+  documentation_in_domain: "README documents the websocket protocol and defines `llm_response` as a single text payload (`README.md:89-99`)."
+
+related_dependencies:
+  internal:
+    - component: backend/app/services/llm_client.py
+      relationship_to_domain: Provides raw assistant reply text to websocket handler.
+      direction: outbound
+    - component: backend/app/services/transcriber.py
+      relationship_to_domain: Produces transcript preceding each assistant reply in websocket flow.
+      direction: outbound
+    - component: frontend/src/types/ws.ts
+      relationship_to_domain: Parses inbound websocket payloads before reducer storage.
+      direction: outbound
+    - component: frontend/src/store/chatReducer.ts
+      relationship_to_domain: Stores assistant reply text used by renderer.
+      direction: outbound
+    - component: frontend/src/utils/assistantMessage.ts
+      relationship_to_domain: Performs think-tag extraction during rendering.
+      direction: outbound
+  external:
+    - name: LM Studio / OpenAI-compatible API
+      purpose_for_domain: Supplies assistant response text prior to sanitization.
+    - name: WebSocket browser API
+      purpose_for_domain: Delivers backend `llm_response` payloads to the React app.
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: Hidden reasoning suppression
+      location: backend/app/ws/audio.py:28-35,166-185
+      concern: Backend intentionally strips `<think>` content before sending assistant replies to clients and before persisting assistant turns in conversation history.
+  authentication_patterns_in_domain: "No authentication or authorization logic was found in the inspected reply-rendering path."
+  authorization_patterns_in_domain: "No authorization checks were present in the inspected `/ws/audio` response pipeline."
+  data_validation_in_domain: "Backend validates incoming websocket JSON enough to extract `type` and emits an error on invalid JSON (`backend/app/ws/audio.py:95-101`). Frontend validates websocket payload shape via `parseServerMessage` (`frontend/src/types/ws.ts:16-43`)."
+
+testing_patterns:
+  framework: pytest and Vitest
+  coverage_areas:
+    - Backend websocket happy path and frame ordering
+    - Backend unicode and large `llm_response` handling
+    - Backend `<think>` sanitization and conversation-history persistence
+    - Frontend websocket payload parsing
+    - Frontend assistant-message think-tag splitting
+  test_organization: "Backend websocket tests are consolidated in `backend/tests/test_ws_audio.py`; frontend parser and websocket-type tests live beside the corresponding utilities in `frontend/src/utils/assistantMessage.test.ts` and `frontend/src/types/ws.test.ts`."
+  mock_patterns:
+    - "Backend tests patch `transcriber_service.transcribe` and `LLMClient` with `AsyncMock` to isolate websocket behavior."
+    - "Frontend tests feed literal strings into pure utilities rather than running the full websocket-to-render pipeline."
+
+open_questions:
+  - question: "Should think content become available through the existing `/ws/audio` `llm_response.text` field, or through a different transport/state shape?"
+    context: "The current live pipeline removes think text in `backend/app/ws/audio.py:166-185`, while the existing frontend parser only operates if raw tags are already present in `message.text` (`frontend/src/components/MessageBubble.tsx:8-38`)."
+  - question: "Should malformed/open-ended think markers continue to be truncated on the backend if the frontend is expected to render think blocks?"
+    context: "Backend sanitizer truncates from the first remaining `<think` onward (`backend/app/ws/audio.py:31-34`), whereas the frontend splitter only handles complete `<think>...</think>` matches (`frontend/src/utils/assistantMessage.ts:6-35`)."
+
+gaps:
+  - area: End-to-end frontend/backend think rendering coverage
+    description: "No current automated test drives a backend reply containing think tags through the real websocket, reducer, and UI rendering path, because backend tests assert sanitization and frontend tests inject tagged strings directly."
+    impact: "Coupling between backend sanitization and frontend think rendering is only inferable by combining separate test suites; regressions across the seam would not be caught by one integrated test."
+  - area: Interactive UI behavior for think blocks
+    description: "No current component or application test covers click-to-collapse, click-to-expand, focus behavior, or distinct typography for think segments."
+    impact: "Any future interactive think-block behavior would add new state and accessibility surface without existing regression coverage in the inspected frontend tests."

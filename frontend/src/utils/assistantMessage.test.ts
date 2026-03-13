@@ -24,4 +24,20 @@ describe('splitAssistantMessage', () => {
       { kind: 'think', text: 'c' },
     ])
   })
+
+  it('treats an open-ended think tag as a think segment through the end of the message', () => {
+    expect(splitAssistantMessage('Visible<think>internal reasoning')).toEqual([
+      { kind: 'text', text: 'Visible' },
+      { kind: 'think', text: 'internal reasoning' },
+    ])
+  })
+
+  it('keeps ordered text and think segments when closed and open-ended think tags are mixed', () => {
+    expect(splitAssistantMessage('A<think>one</think>B<think>two')).toEqual([
+      { kind: 'text', text: 'A' },
+      { kind: 'think', text: 'one' },
+      { kind: 'text', text: 'B' },
+      { kind: 'think', text: 'two' },
+    ])
+  })
 })

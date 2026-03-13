@@ -182,8 +182,8 @@ def test_large_unicode_llm_response_round_trip_over_websocket() -> None:
             assert ws.receive_json() == {"type": "status", "state": "idle"}
 
 
-def test_large_sanitized_unicode_llm_response_round_trip_over_websocket() -> None:
-    """Large replies should be sanitized before send while preserving visible unicode text."""
+def test_large_think_tagged_unicode_llm_response_round_trip_over_websocket() -> None:
+    """Large replies should preserve raw think-tagged unicode text on the websocket."""
     transcript_text = "请清理并发送这段回复。"
     raw_reply = ("保留这段可见文本🙂世界。" * 220) + ("<think>内部推理🔒</think>" * 180) + (
         "再保留这一段Привет🌍。" * 220
@@ -210,9 +210,10 @@ def test_large_sanitized_unicode_llm_response_round_trip_over_websocket() -> Non
 
             llm_event = ws.receive_json()
             assert llm_event["type"] == "llm_response"
-            assert llm_event["text"] == sanitized_reply
-            assert "<think>" not in llm_event["text"]
-            assert "内部推理" not in llm_event["text"]
+            assert llm_event["text"] == raw_reply
+            assert "<think>" in llm_event["text"]
+            assert "内部推理" in llm_event["text"]
+            assert sanitized_reply != llm_event["text"]
             assert "保留这段可见文本🙂世界。" in llm_event["text"]
             assert "再保留这一段Привет🌍。" in llm_event["text"]
 
@@ -233,8 +234,15 @@ def test_sanitize_llm_reply_truncates_open_ended_think_blocks() -> None:
     assert sanitize_llm_reply(raw_reply) == "可见前缀🙂"
 
 
-def test_llm_response_suppresses_think_blocks_and_history_uses_sanitized_reply() -> None:
-    """Sanitized assistant text should be sent and persisted in conversation history."""
+def test_sanitize_llm_reply_preserves_lookalike_tags() -> None:
+    """Lookalike tags should remain visible unless they are real think tags."""
+    raw_reply = "Visible<thinkabout>keep me</thinkabout><thinking>still visible</thinking>"
+
+    assert sanitize_llm_reply(raw_reply) == raw_reply
+
+
+def test_llm_response_sends_raw_reply_and_history_uses_sanitized_reply() -> None:
+    """Raw assistant text should be sent while sanitized text is persisted in history."""
     raw_reply = "Ответ: Привет<think>private 推理 🤫</think>你好 🙂"
     sanitized_reply = "Ответ: Привет你好 🙂"
     mock_llm = AsyncMock()
@@ -253,7 +261,7 @@ def test_llm_response_suppresses_think_blocks_and_history_uses_sanitized_reply()
             assert ws.receive_json() == {"type": "status", "state": "transcribing"}
             assert ws.receive_json() == {"type": "transcript", "text": "first prompt"}
             assert ws.receive_json() == {"type": "status", "state": "thinking"}
-            assert ws.receive_json() == {"type": "llm_response", "text": sanitized_reply}
+            assert ws.receive_json() == {"type": "llm_response", "text": raw_reply}
             assert ws.receive_json() == {"type": "status", "state": "idle"}
 
             ws.send_json({"type": "start"})
@@ -272,8 +280,8 @@ def test_llm_response_suppresses_think_blocks_and_history_uses_sanitized_reply()
     ]
 
 
-def test_open_ended_think_block_is_truncated_in_websocket_response_and_history() -> None:
-    """Open-ended think output should be truncated before send and history persistence."""
+def test_open_ended_think_block_is_sent_raw_and_truncated_in_history() -> None:
+    """Open-ended think output should be sent raw but truncated before history persistence."""
     raw_reply = "Visible🙂世界<think>private 推理 🤫"
     sanitized_reply = "Visible🙂世界"
     mock_llm = AsyncMock()
@@ -292,7 +300,49 @@ def test_open_ended_think_block_is_truncated_in_websocket_response_and_history()
             assert ws.receive_json() == {"type": "status", "state": "transcribing"}
             assert ws.receive_json() == {"type": "transcript", "text": "first prompt"}
             assert ws.receive_json() == {"type": "status", "state": "thinking"}
-            assert ws.receive_json() == {"type": "llm_response", "text": sanitized_reply}
+            assert ws.receive_json() == {"type": "llm_response", "text": raw_reply}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "second prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": "Second reply"}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+    second_call = mock_llm.chat.await_args_list[1]
+    assert second_call.kwargs["history"] == [
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": sanitized_reply},
+    ]
+
+
+def test_large_think_tagged_unicode_reply_stays_sanitized_in_second_turn_history() -> None:
+    """Large raw think-tagged replies should remain sanitized when reused as history."""
+    raw_reply = ("保留这段可见文本🙂世界。" * 220) + ("<think>内部推理🔒</think>" * 180) + (
+        "再保留这一段Привет🌍。" * 220
+    )
+    sanitized_reply = ("保留这段可见文本🙂世界。" * 220) + ("再保留这一段Привет🌍。" * 220)
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = [raw_reply, "Second reply"]
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.side_effect = ["first prompt", "second prompt"]
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_bytes(b"\x02" * 512)
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "first prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": raw_reply}
             assert ws.receive_json() == {"type": "status", "state": "idle"}
 
             ws.send_json({"type": "start"})
@@ -496,7 +546,7 @@ async def test_disconnect_during_llm_response_send_uses_existing_disconnect_path
         {"type": "status", "state": "transcribing"},
         {"type": "transcript", "text": "hello"},
         {"type": "status", "state": "thinking"},
-        {"type": "llm_response", "text": "Visible🙂世界"},
+        {"type": "llm_response", "text": "Visible🙂<think>private</think>世界"},
     ]
     assert "disconnect during send type=llm_response" in caplog.text
     assert "client disconnected state=LLM_CALLING" in caplog.text

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ChatAction } from '@/store/chatReducer'
 import type { AudioCaptureState } from '@/hooks/useAudioStream'
@@ -122,6 +122,82 @@ describe('App toggle speak control', () => {
     expect(
       screen.getByRole('button', { name: 'Processing — please wait' }).getAttribute('aria-pressed'),
     ).toBe('false')
+  })
+
+  it('toggles with an unfocused global Space shortcut and prevents scrolling only when handled', () => {
+    render(<App />)
+
+    const handledStart = fireEvent.keyDown(document.body, {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    })
+
+    expect(handledStart).toBe(false)
+    expect(startSpy).toHaveBeenCalledTimes(1)
+    expect(stopSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Stop recording' }).getAttribute('aria-pressed')).toBe(
+      'true',
+    )
+
+    const handledStop = fireEvent.keyDown(document.body, {
+      key: ' ',
+      code: 'Space',
+      bubbles: true,
+      cancelable: true,
+    })
+
+    expect(handledStop).toBe(false)
+    expect(startSpy).toHaveBeenCalledTimes(1)
+    expect(stopSpy).toHaveBeenCalledTimes(1)
+    expect(
+      screen.getByRole('button', { name: 'Processing — please wait' }).getAttribute('aria-pressed'),
+    ).toBe('false')
+  })
+
+  it('ignores the global Space shortcut inside editable or interactive targets', () => {
+    render(<App />)
+
+    const contentEditableRegion = document.createElement('div')
+    contentEditableRegion.setAttribute('contenteditable', 'true')
+
+    const editableTargets = [
+      Object.assign(document.createElement('input'), { type: 'text' }),
+      document.createElement('textarea'),
+      document.createElement('select'),
+      contentEditableRegion,
+    ]
+
+    for (const target of editableTargets) {
+      document.body.appendChild(target)
+
+      const event = new KeyboardEvent('keydown', {
+        key: ' ',
+        code: 'Space',
+        bubbles: true,
+        cancelable: true,
+      })
+
+      target.dispatchEvent(event)
+    }
+
+    const link = Object.assign(document.createElement('a'), { href: '#' })
+    document.body.appendChild(link)
+    link.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: ' ',
+        code: 'Space',
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+
+    expect(startSpy).not.toHaveBeenCalled()
+    expect(stopSpy).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Start recording' }).getAttribute('aria-pressed')).toBe(
+      'false',
+    )
   })
 
   it('stops an active capture even after the reducer enters the error phase', async () => {

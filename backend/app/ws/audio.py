@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _THINK_BLOCK_PATTERN = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN_PATTERN = re.compile(r"<think", re.IGNORECASE)
+_THINK_OPEN_PATTERN = re.compile(r"<think(?=[\s>/]|$)", re.IGNORECASE)
 
 
 class _State(Enum):
@@ -163,12 +163,13 @@ async def ws_audio(websocket: WebSocket) -> None:
                         state = _State.IDLE
                         continue
 
-                    sanitized_reply = sanitize_llm_reply(reply)
-                    if sanitized_reply != reply:
+                    raw_reply = reply
+                    sanitized_reply = sanitize_llm_reply(raw_reply)
+                    if sanitized_reply != raw_reply:
                         logger.info(
                             "[ws:%s] sanitized llm reply raw_length=%d clean_length=%d",
                             session_id,
-                            len(reply),
+                            len(raw_reply),
                             len(sanitized_reply),
                         )
                     conversation_history.extend(
@@ -177,11 +178,11 @@ async def ws_audio(websocket: WebSocket) -> None:
                     logger.info(
                         "[ws:%s] llm reply length=%d reply_bytes=%d history_messages=%d",
                         session_id,
-                        len(sanitized_reply),
-                        len(sanitized_reply.encode("utf-8")),
+                        len(raw_reply),
+                        len(raw_reply.encode("utf-8")),
                         len(conversation_history),
                     )
-                    await _send({"type": "llm_response", "text": sanitized_reply})
+                    await _send({"type": "llm_response", "text": raw_reply})
                     state = _State.IDLE
                     await _send({"type": "status", "state": "idle"})
 

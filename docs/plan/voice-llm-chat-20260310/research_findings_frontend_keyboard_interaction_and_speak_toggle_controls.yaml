@@ -1,0 +1,291 @@
+plan_id: voice-llm-chat-20260310
+objective: allow the speak / stop control to be triggered by the space key while preserving the existing voice-chat UX.
+focus_area: frontend keyboard interaction and speak-toggle controls
+created_at: "2026-03-13T00:00:00Z"
+created_by: research-specialist
+status: completed
+
+tldr: |
+  - The speak/stop toggle is orchestrated in `frontend/src/App.tsx` via `handleMicToggle`, which decides between start, stop, cancel, or no-op based on `captureState` plus reducer `phase`.
+  - The visible control is a native `<button>` in `frontend/src/components/MicButton.tsx`, so focused keyboard activation already works through built-in Enter/Space behavior; this is covered by `frontend/src/App.toggle.test.tsx`.
+  - There are no existing custom keyboard listeners or text inputs in `frontend/src`, so a new unfocused/global Space shortcut would most naturally be added near `handleMicToggle` in `App.tsx` or a hook owned by `App`.
+  - Primary planning risks are Space scrolling the page when focus is outside the button, interfering with future focused inputs, and preserving button accessibility semantics/disabled states.
+  - Planner handoff files: `frontend/src/App.tsx`, `frontend/src/components/MicButton.tsx`, `frontend/src/components/BottomBar.tsx`, `frontend/src/App.toggle.test.tsx`, `frontend/src/store/chatReducer.ts`, `frontend/src/hooks/useAudioStream.ts`.
+
+research_metadata:
+  methodology: hybrid repository search with ripgrep plus targeted file reads of the toggle owner, presentational button, reducer, audio hook, and toggle tests.
+  tools_used:
+    - rg
+    - view
+    - bash
+  scope: focused review of frontend speak-toggle wiring, keyboard behavior, related state transitions, and nearby UI surfaces in `frontend/src`.
+  confidence: high
+  coverage: 95
+
+files_analyzed:
+  - file: App.tsx
+    path: frontend/src/App.tsx
+    purpose: owns chat state, audio/websocket hooks, derives the effective control phase, and defines the mic toggle callback passed to the footer.
+    key_elements:
+      - element: controlPhase
+        type: variable
+        location: frontend/src/App.tsx:23-28
+        description: derives UI control phase from audio `captureState` before falling back to reducer phase.
+      - element: handleMicToggle
+        type: function
+        location: frontend/src/App.tsx:30-48
+        description: central toggle entry point; stops when capture is active, starts in idle/responding/error, and otherwise no-ops.
+    language: TSX
+    lines: 79
+  - file: BottomBar.tsx
+    path: frontend/src/components/BottomBar.tsx
+    purpose: renders waveform, transcript preview, and the centered mic button.
+    key_elements:
+      - element: MicButton composition
+        type: pattern
+        location: frontend/src/components/BottomBar.tsx:37-40
+        description: passes phase and toggle handler down without adding keyboard logic.
+    language: TSX
+    lines: 43
+  - file: MicButton.tsx
+    path: frontend/src/components/MicButton.tsx
+    purpose: phase-driven presentational recording button with accessibility labels, pressed state, and disabled state.
+    key_elements:
+      - element: PHASE_CONFIG
+        type: variable
+        location: frontend/src/components/MicButton.tsx:10-47
+        description: maps each phase to label, aria-label, styling, and disabled behavior.
+      - element: MicButton
+        type: function
+        location: frontend/src/components/MicButton.tsx:54-75
+        description: native `<button>` that invokes `onToggle` from `onClick` when not disabled.
+    language: TSX
+    lines: 77
+  - file: App.toggle.test.tsx
+    path: frontend/src/App.toggle.test.tsx
+    purpose: verifies click and keyboard activation behavior for the speak/stop control.
+    key_elements:
+      - element: keyboard activation test
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:101-125
+        description: confirms focused Enter starts and focused Space stops via button semantics.
+      - element: error-phase stop test
+        type: pattern
+        location: frontend/src/App.toggle.test.tsx:127-147
+        description: confirms an active capture can still be stopped even if reducer phase becomes `error`.
+    language: TSX
+    lines: 148
+  - file: chatReducer.ts
+    path: frontend/src/store/chatReducer.ts
+    purpose: models the voice-chat phase machine used by the UI.
+    key_elements:
+      - element: Phase
+        type: variable
+        location: frontend/src/store/chatReducer.ts:25-31
+        description: phase union used to gate button semantics.
+      - element: recording lifecycle actions
+        type: pattern
+        location: frontend/src/store/chatReducer.ts:110-136
+        description: transitions request/start/stop/cancel/error states that the button reflects.
+    language: TS
+    lines: 182
+  - file: useAudioStream.ts
+    path: frontend/src/hooks/useAudioStream.ts
+    purpose: performs microphone start, cancel, and stop operations and exposes `captureState` used to override UI phase.
+    key_elements:
+      - element: startRecording
+        type: function
+        location: frontend/src/hooks/useAudioStream.ts:151-275
+        description: requests mic, builds audio graph, sends start event, and sets capture state.
+      - element: stopRecording
+        type: function
+        location: frontend/src/hooks/useAudioStream.ts:277-302
+        description: cancels startup during `starting`, otherwise sends stop once and dispatches `RECORD_STOP`.
+    language: TS
+    lines: 312
+  - file: ChatThread.tsx
+    path: frontend/src/components/ChatThread.tsx
+    purpose: renders chat messages and is the main scrollable area that could react to Space scrolling when focus is not on the mic button.
+    key_elements:
+      - element: scrollable chat section
+        type: pattern
+        location: frontend/src/components/ChatThread.tsx:17-21
+        description: vertically scrollable section with polite live-region semantics.
+    language: TSX
+    lines: 35
+
+patterns_found:
+  - category: architecture
+    pattern: container-owned toggle logic with presentational button
+    description: recording behavior is decided in `App`, while footer/button components only render phase-dependent UI and forward the callback.
+    examples:
+      - file: frontend/src/App.tsx
+        location: frontend/src/App.tsx:30-48
+        snippet: "const handleMicToggle = useCallback(() => { if (captureState !== 'idle') { stopRecording(); return } ... })"
+      - file: frontend/src/components/MicButton.tsx
+        location: frontend/src/components/MicButton.tsx:72-72
+        snippet: "onClick={() => !disabled && onToggle()}"
+    prevalence: common
+  - category: accessibility
+    pattern: native button semantics drive current keyboard support
+    description: the mic control is a real button with `type=button`, `aria-label`, `aria-pressed`, and disabled state, so focused Enter/Space activation comes from browser defaults.
+    examples:
+      - file: frontend/src/components/MicButton.tsx
+        location: frontend/src/components/MicButton.tsx:59-63
+        snippet: "<button type=\"button\" aria-label={ariaLabel} aria-pressed={isPressed} disabled={disabled}>"
+      - file: frontend/src/App.toggle.test.tsx
+        location: frontend/src/App.toggle.test.tsx:101-125
+        snippet: "it('toggles with keyboard activation for Enter and Space', async () => { ... await user.keyboard('{Enter}') ... await user.keyboard(' ') ... })"
+    prevalence: common
+  - category: structure
+    pattern: capture-state override protects stop/cancel behavior even if reducer phase drifts
+    description: UI phase is derived from live capture state first, which lets the same toggle stop or cancel ongoing capture independent of reducer transitions.
+    examples:
+      - file: frontend/src/App.tsx
+        location: frontend/src/App.tsx:23-28
+        snippet: "const controlPhase = captureState === 'idle' ? state.phase : captureState === 'starting' ? 'requesting-mic' : 'recording'"
+      - file: frontend/src/App.tsx
+        location: frontend/src/App.tsx:31-33
+        snippet: "if (captureState !== 'idle') { stopRecording(); return }"
+      - file: frontend/src/App.toggle.test.tsx
+        location: frontend/src/App.toggle.test.tsx:127-147
+        snippet: "stops an active capture even after the reducer enters the error phase"
+    prevalence: common
+  - category: keyboard
+    pattern: no custom global keyboard handling exists today
+    description: repository search found no `keydown`/`keyup` listeners or component key handlers in `frontend/src`; current keyboard behavior is limited to native focused control activation.
+    examples:
+      - file: frontend/src/components/MicButton.tsx
+        location: frontend/src/components/MicButton.tsx:54-75
+        snippet: "MicButton exposes only onClick, not onKeyDown/onKeyUp."
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: App
+      responsibility: owns state, hooks, and mic toggle callback
+      location: frontend/src/App.tsx
+      relationship_to_domain: domain entry point
+    - component: BottomBar
+      responsibility: footer wrapper for waveform, transcript, and button
+      location: frontend/src/components/BottomBar.tsx
+      relationship_to_domain: renders domain control surface
+    - component: MicButton
+      responsibility: accessible phase-based recording button UI
+      location: frontend/src/components/MicButton.tsx
+      relationship_to_domain: visible trigger for the domain action
+    - component: useAudioStream
+      responsibility: actual mic start/cancel/stop side effects
+      location: frontend/src/hooks/useAudioStream.ts
+      relationship_to_domain: domain depends on this
+    - component: chatReducer
+      responsibility: phase machine consumed by the control UI
+      location: frontend/src/store/chatReducer.ts
+      relationship_to_domain: domain depends on this
+  interfaces_used_by_domain:
+    - interface: BottomBarProps.onMicToggle
+      location: frontend/src/components/BottomBar.tsx:7-12
+      usage_pattern: callback prop passed from App to MicButton
+    - interface: MicButtonProps.onToggle
+      location: frontend/src/components/MicButton.tsx:49-52
+      usage_pattern: presentational button callback for toggle activation
+    - interface: AudioStreamHandle
+      location: frontend/src/hooks/useAudioStream.ts:70-86
+      usage_pattern: App consumes start/stop/captureState from the audio hook
+  data_flow_involving_domain: App derives `controlPhase` from reducer state plus `captureState`, passes `handleMicToggle` into BottomBar/MicButton, and that callback calls `startRecording` or `stopRecording`, which dispatch reducer actions and websocket audio events.
+  key_relationships_to_domain:
+    - from: frontend/src/App.tsx
+      to: frontend/src/hooks/useAudioStream.ts
+      relationship: calls
+    - from: frontend/src/App.tsx
+      to: frontend/src/store/chatReducer.ts
+      relationship: imports
+    - from: frontend/src/App.tsx
+      to: frontend/src/components/BottomBar.tsx
+      relationship: composes
+    - from: frontend/src/components/BottomBar.tsx
+      to: frontend/src/components/MicButton.tsx
+      relationship: composes
+
+related_technology_stack:
+  languages_used_in_domain:
+    - TypeScript
+    - TSX
+  frameworks_used_in_domain:
+    - name: React
+      usage_in_domain: component composition, reducer state, callback wiring, and hooks for audio lifecycle.
+    - name: Vitest + Testing Library
+      usage_in_domain: toggle interaction tests for pointer and keyboard activation.
+  libraries_used_in_domain: []
+  external_apis_used_in_domain:
+    - name: DOM button keyboard semantics
+      integration_point: frontend/src/components/MicButton.tsx
+    - name: MediaDevices.getUserMedia / Web Audio API / WebSocket
+      integration_point: frontend/src/hooks/useAudioStream.ts
+
+related_conventions:
+  naming_patterns_in_domain: phase names and actions are explicit (`idle`, `requesting-mic`, `recording`, `processing`, `responding`, `error`; `MIC_REQUESTING`, `RECORD_STOP`).
+  structure_of_domain: `App` owns behavior, hooks own side effects, and small components remain presentational.
+  error_handling_in_domain: start failures dispatch friendly `MIC_ERROR` messages; active capture stop remains available through `captureState` even if reducer phase shifts to `error`.
+  testing_in_domain: interaction tests live beside `App` and assert accessible role/name-based behavior rather than CSS or implementation details.
+  documentation_in_domain: reducer and audio hook include detailed header comments describing phases and lifecycle expectations.
+
+related_dependencies:
+  internal:
+    - component: frontend/src/hooks/useAudioStream.ts
+      relationship_to_domain: provides start/stop/cancel side effects and capture state
+      direction: outbound
+    - component: frontend/src/store/chatReducer.ts
+      relationship_to_domain: provides phases and lifecycle transitions used by the control
+      direction: outbound
+    - component: frontend/src/components/MicButton.tsx
+      relationship_to_domain: renders the current control semantics
+      direction: outbound
+    - component: frontend/src/App.toggle.test.tsx
+      relationship_to_domain: verifies current control behavior
+      direction: inbound
+  external:
+    - name: browser native button keyboard behavior
+      purpose_for_domain: current focused Space/Enter activation without custom listeners
+    - name: browser default scrolling on Space
+      purpose_for_domain: potential conflict if a global shortcut is added outside focused button semantics
+
+domain_security_considerations:
+  sensitive_areas:
+    - area: microphone activation
+      location: frontend/src/hooks/useAudioStream.ts:151-179
+      concern: keyboard-triggered start still routes into `getUserMedia`, which is permission-gated by the browser.
+  authentication_patterns_in_domain: none observed in this focus area.
+  authorization_patterns_in_domain: none observed in this focus area.
+  data_validation_in_domain: toggle paths are phase-gated in `handleMicToggle` and `stopRecording` to ignore invalid or duplicate transitions.
+
+testing_patterns:
+  framework: Vitest with @testing-library/react and @testing-library/user-event
+  coverage_areas:
+    - pointer click toggle start/stop
+    - focused Enter and Space activation
+    - stop behavior while reducer is in error phase
+  test_organization: a dedicated `App.toggle.test.tsx` file mocks audio/websocket hooks and exercises the app through accessible button queries.
+  mock_patterns:
+    - mock `useAudioStream` to control `captureState` and spy on `startRecording`/`stopRecording`
+    - mock `useWebSocket` to inject reducer actions
+
+planner_handoff_files:
+  - frontend/src/App.tsx
+  - frontend/src/components/MicButton.tsx
+  - frontend/src/components/BottomBar.tsx
+  - frontend/src/App.toggle.test.tsx
+  - frontend/src/store/chatReducer.ts
+  - frontend/src/hooks/useAudioStream.ts
+  - frontend/src/components/ChatThread.tsx
+
+open_questions:
+  - question: Should the planned Space shortcut fire only when the mic button is focused, or anywhere in the app when focus is not inside another interactive element?
+    context: Native button support already covers focused activation; the planning decision is about adding an additional unfocused/global shortcut path.
+  - question: During `processing`, should a global Space press be ignored exactly like the disabled button, or should it queue/interrupt behavior?
+    context: Current button semantics are disabled in `processing` (`frontend/src/components/MicButton.tsx:29-34`), so a new shortcut should be evaluated against that existing contract.
+
+gaps:
+  - area: future input surfaces
+    description: No text inputs or editable controls exist in current `frontend/src`, so conflict analysis is limited to the current UI and browser/page behavior.
+    impact: low; current planner can reason confidently about the present app, but future text-entry features would need fresh exclusion rules for Space handling.
