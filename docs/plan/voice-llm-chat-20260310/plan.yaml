@@ -1,31 +1,30 @@
 plan_id: voice-llm-chat-20260310
 objective: >
-  Build a fullstack voice-first LLM chat app from an empty workspace:
-  React + Vite 7 + TypeScript cyberpunk frontend streams microphone audio over
-  WebSocket to a Python/FastAPI backend, which transcribes with Whisper and
-  forwards the transcript to an LM Studio OpenAI-compatible endpoint, then returns
-  the assistant response for display.
+  Build and harden the voice-first LLM chat app:
+  preserve the shipped React + Vite + FastAPI voice pipeline while adding a minimal
+  backend fix for websocket disconnects observed during `llm_response` delivery by
+  suppressing `<think>...</think>` blocks before send, preserving normal unicode
+  output, and adding focused backend regression coverage.
 created_at: "2026-03-10"
 created_by: gem-team/gem-planner
-status: pending_approval
+status: completed
 research_confidence: high
 
 tldr: |
-  11 atomic tasks in 5 waves deliver a working local voice→LLM pipeline:
+  13 atomic tasks in 6 waves deliver and harden the local voice→LLM pipeline:
     Wave 1 (task-001)                    – repo skeleton (monorepo layout, Makefile, env.example, .gitignore)
     Wave 2 (task-002, task-006)          – backend and frontend scaffolds in parallel
     Wave 3 (task-003, task-004, task-007)– backend services (Whisper + LM client) and frontend state machine, in parallel
     Wave 4 (task-005, task-008, task-009)– WebSocket endpoint wired to services; UI components; App assembly
     Wave 5 (task-010, task-011)          – smoke validation + README
+    Wave 6 (task-012, task-013)          – backend reply sanitization + websocket send-race regression coverage
   Key design choices: uv for Python env; Vite proxy eliminates CORS; useReducer state machine;
   Whisper loaded once via FastAPI lifespan; run_in_executor for sync transcription.
+  Bugfix wave scope stays backend-first: strip `<think>...</think>` blocks before `llm_response`,
+  keep `ensure_ascii=False` unicode delivery unchanged, and avoid frontend work unless tests prove it is needed.
 
 open_questions:
-  - Which Whisper model size should be the default? (plan assumes "base"; change WHISPER_MODEL env var for small/medium)
-  - Is pnpm the preferred JS package manager, or npm/yarn? (plan assumes pnpm; adjust scripts/dev.sh otherwise)
-  - Should AudioContext resampling happen on the frontend (preferred — no librosa dep) or backend?
-    (plan assumes frontend resamples to 16 kHz before sending PCM)
-  - Does the developer already have LM Studio running locally? Validation task pings it but does not start it.
+  - If future client telemetry exposes a repeatable browser close code or proxy involvement, decide whether a follow-up frontend/reconnect task is needed; this wave assumes backend-only changes.
 
 pre_mortem:
   overall_risk_level: medium
@@ -60,6 +59,18 @@ pre_mortem:
       mitigation: >
         Transcription always runs inside asyncio.get_event_loop().run_in_executor(None, _run)
         — enforced in task-003 implementation spec and verified in task-010.
+    - scenario: Sanitization removes visible assistant content outside `<think>` blocks or stores unsanitized text in conversation history
+      likelihood: medium
+      impact: high
+      mitigation: >
+        Sanitize once in the backend reply path and add regression tests that cover mixed
+        visible text, large replies, and persisted conversation history expectations.
+    - scenario: The bugfix changes websocket behavior for normal unicode payloads and reintroduces encoding regressions
+      likelihood: low
+      impact: high
+      mitigation: >
+        Keep the existing `json.dumps(..., ensure_ascii=False)` send path unchanged and add
+        regression coverage for large sanitized unicode replies plus disconnect-during-send behavior.
 
   assumptions:
     - Developer has Python 3.11+, Node.js 20+, pnpm, uv, and git installed locally.
@@ -68,6 +79,8 @@ pre_mortem:
     - No CI/CD pipeline is in scope for this plan; local dev workflow only.
     - Audio is captured as PCM Int16 at 16 kHz mono by the frontend AudioWorklet.
     - Whisper "base" model (~74 M params) is sufficient for dev; env var allows override.
+    - The observed websocket failure is caused by a peer/client close during send, not by unicode or a 5.6 KB payload size.
+    - No frontend code change is required unless backend regression tests uncover a browser-side lifecycle defect.
 
 implementation_specification:
   code_structure: |
@@ -126,7 +139,8 @@ implementation_specification:
   affected_areas:
     - Repo root (Makefile, .gitignore, .env.example, README.md, scripts/)
     - backend/ (full Python service: FastAPI, Whisper, LM Studio client)
-    - frontend/ (full React+Vite app: state machine, hooks, cyberpunk UI components)
+    - backend/app/ws/audio.py and backend/tests/test_ws_audio.py for websocket reply sanitization and send-race regression coverage
+    - frontend/ remains unchanged unless backend regression evidence proves a client lifecycle gap
 
   component_details:
     - component: backend/app/core/config.py
@@ -157,16 +171,22 @@ implementation_specification:
       responsibility: >
         WebSocket endpoint at /ws/audio. Implements server-side state machine:
         IDLE → BUFFERING (on "start" event) → TRANSCRIBING (on "stop" event)
-        → LLM_CALLING → IDLE. Sends JSON status, transcript, llm_response frames.
+        → LLM_CALLING → IDLE. Sanitizes assistant replies by suppressing
+        `<think>...</think>` blocks before conversation-history persistence and
+        `llm_response` delivery, while preserving normal unicode JSON payloads and
+        existing disconnect handling.
       interfaces:
         - "@router.websocket('/ws/audio') async def ws_audio_endpoint(ws, app)"
+        - "def sanitize_llm_reply(text: str) -> str"
 
     - component: frontend/src/store/chatReducer.ts
       responsibility: >
         useReducer state machine: Phase (idle | requesting-mic | recording |
         processing | responding | error) × WsStatus × messages[] × transcript.
       interfaces:
-        - "type Phase", "type ChatState", "chatReducer(state, action) → ChatState"
+        - "type Phase"
+        - "type ChatState"
+        - "chatReducer(state, action) → ChatState"
 
     - component: frontend/src/hooks/useAudioStream.ts
       responsibility: >
@@ -200,7 +220,7 @@ implementation_specification:
 
   dependencies:
     - component: backend/app/ws/audio.py
-      relationship: calls transcriber.transcribe() and llm_client.chat() sequentially per utterance
+      relationship: calls transcriber.transcribe() and llm_client.chat() sequentially per utterance, then sanitizes assistant text before persisting and sending it
     - component: backend/app/main.py
       relationship: registers ws router; lifespan calls transcriber.load_model() and stores on app.state
     - component: frontend/src/App.tsx
@@ -212,6 +232,7 @@ implementation_specification:
     - ".env.example documents VITE_WS_URL, VITE_APP_TITLE, LM_STUDIO_BASE_URL, LM_STUDIO_MODEL, WHISPER_MODEL"
     - "scripts/dev.sh runs `uv run uvicorn` and `pnpm dev` concurrently via & wait or npx concurrently"
     - "Backend /healthz GET endpoint for readiness check (used by smoke test and README instructions)"
+    - "Backend `llm_response` delivery remains UTF-8 JSON with `ensure_ascii=False`; only `<think>...</think>` sections are suppressed before send"
 
 # ──────────────────────────────────────────────────────────────────────────────
 tasks:
@@ -495,7 +516,7 @@ tasks:
       - vite.config.ts contains ws proxy configuration
       - Cyberpunk CSS tokens visible in browser DevTools :root computed styles
     acceptance_criteria:
-      - `pnpm build` produces zero TypeScript errors
+      - "`pnpm build` produces zero TypeScript errors"
       - Tailwind neon-cyan class renders correct color in browser
     requires_review: false
     tech_stack:
@@ -683,7 +704,7 @@ tasks:
       - WebSocket connection status badge updates correctly
     acceptance_criteria:
       - Complete render path from App.tsx down to leaf components with no TypeScript errors
-      - `pnpm build` succeeds with zero errors; bundle size reasonable (< 2 MB)
+      - "`pnpm build` succeeds with zero errors; bundle size reasonable (< 2 MB)"
     requires_review: false
     tech_stack:
       - React
@@ -808,3 +829,91 @@ tasks:
       - Architecture overview (ASCII diagrams)
       - Whisper model size tradeoffs
       - Troubleshooting guide
+
+  - id: task-012
+    title: Backend — sanitize LLM replies before websocket delivery
+    description: |
+      Apply the minimal backend-only fix for the websocket disconnect bug:
+        - Suppress `<think>...</think>` blocks from assistant text before it is stored in
+          conversation history or sent as `llm_response`
+        - Preserve all normal unicode / non-ASCII characters and keep the existing
+          `json.dumps(..., ensure_ascii=False)` websocket send path unchanged
+        - Keep send-time disconnect handling minimal and safe: continue treating peer-close
+          during `websocket.send_text` as a normal disconnect path, not a payload-encoding bug
+        - Add only lightweight observability if needed to distinguish "reply sanitized" from
+          "peer closed during send" in backend logs
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-004
+      - task-005
+    context_files:
+      research_findings_bug: docs/plan/voice-llm-chat-20260310/research_findings_websocket-disconnect-bug.yaml
+    estimated_effort: small
+    estimated_files: 2
+    estimated_lines: 80
+    focus_area: backend-websocket-sanitization
+    verification:
+      - "`llm_response` frames never include raw `<think>` blocks"
+      - "Mixed unicode content outside suppressed blocks survives unchanged over the websocket path"
+      - "Send-time disconnects still exit through the existing disconnect/logging path without crashing the server"
+    acceptance_criteria:
+      - Assistant text shown to clients excludes `<think>...</think>` content
+      - Cyrillic, CJK, emoji, and other non-ASCII reply content are preserved
+      - No frontend change is introduced unless required by a failing regression test
+    requires_review: true
+    review_depth: standard
+    security_sensitive: false
+    tech_stack:
+      - Python
+      - FastAPI WebSocket
+      - asyncio
+      - JSON UTF-8 serialization
+    test_coverage: "backend/tests/test_ws_audio.py: sanitized llm_response path keeps unicode and suppresses think blocks"
+    failure_modes:
+      - scenario: Sanitizer removes visible assistant text outside `<think>` blocks or leaves conversation history inconsistent with the sent reply
+        likelihood: medium
+        impact: high
+        mitigation: Sanitize once in the backend send path and assert both persisted history and emitted `llm_response` use the same sanitized text
+
+  - id: task-013
+    title: Backend — regression coverage for disconnect during send
+    description: |
+      Add focused backend regression tests for the bugfix wave:
+        - Simulate a client/peer close during `llm_response` send and verify the server
+          handles the send-time disconnect without crashing or misclassifying it as a unicode issue
+        - Add a large reply test containing unicode plus `<think>` blocks and verify the
+          delivered payload is sanitized, remains valid UTF-8 JSON text, and reaches the client intact
+        - Reuse existing backend websocket fixtures and avoid frontend test additions unless these
+          backend regressions expose a browser-specific gap
+    agent: gem-team/gem-implementer
+    priority: high
+    status: done
+    dependencies:
+      - task-012
+    context_files:
+      research_findings_bug: docs/plan/voice-llm-chat-20260310/research_findings_websocket-disconnect-bug.yaml
+    estimated_effort: medium
+    estimated_files: 1
+    estimated_lines: 120
+    focus_area: backend-regression-tests
+    verification:
+      - "pytest includes a disconnect-during-send test that deterministically exercises the `llm_response` send path"
+      - "pytest includes a large sanitized unicode reply test that asserts `<think>` content is absent and visible text is preserved"
+      - "Existing unicode round-trip coverage still passes unchanged"
+    acceptance_criteria:
+      - Backend test suite covers the suspected peer-close race and sanitized large reply delivery
+      - Tests demonstrate unicode handling remains supported after the fix
+      - No new frontend task is required to explain the observed failure
+    requires_review: false
+    tech_stack:
+      - Python
+      - pytest
+      - starlette.testclient
+    test_coverage: "backend/tests/test_ws_audio.py: disconnect during llm_response send; large sanitized unicode reply delivery"
+    failure_modes:
+      - scenario: New regression test is flaky because the disconnect race is not deterministic
+        likelihood: medium
+        impact: medium
+        mitigation: Inject or stub the send path so the close occurs exactly when `llm_response` is emitted instead of relying on timing

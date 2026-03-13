@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import WebSocketDisconnect
 from starlette.testclient import TestClient
 
 from app.main import app
+from app.ws import audio as ws_audio_module
+from app.ws.audio import sanitize_llm_reply
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +120,194 @@ def test_second_turn_includes_prior_chat_history() -> None:
     assert second_call.kwargs["history"] == [
         {"role": "user", "content": "first prompt"},
         {"role": "assistant", "content": "First reply"},
+    ]
+
+
+def test_unicode_transcript_and_llm_response_round_trip_over_websocket() -> None:
+    """Chinese transcript and LLM reply should survive the websocket flow intact."""
+    transcript_text = "请帮我总结今天的会议内容。"
+    reply_text = "当然可以，以下是今天会议的重点总结。"
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = reply_text
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.return_value = transcript_text
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_bytes("你好，世界".encode("utf-8"))
+            ws.send_json({"type": "stop"})
+
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": transcript_text}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": reply_text}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+    mock_llm.chat.assert_awaited_once_with(transcript_text, history=[])
+
+
+def test_large_unicode_llm_response_round_trip_over_websocket() -> None:
+    """Large unicode replies should still be delivered over the websocket."""
+    transcript_text = "请详细解释下面这段日志。"
+    reply_text = "这是一个很长的中文响应。 " * 700
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = reply_text
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.return_value = transcript_text
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_bytes(b"\x01" * 512)
+            ws.send_json({"type": "stop"})
+
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": transcript_text}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+
+            llm_event = ws.receive_json()
+            assert llm_event["type"] == "llm_response"
+            assert llm_event["text"] == reply_text
+            assert len(llm_event["text"]) == len(reply_text)
+
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+
+def test_large_sanitized_unicode_llm_response_round_trip_over_websocket() -> None:
+    """Large replies should be sanitized before send while preserving visible unicode text."""
+    transcript_text = "请清理并发送这段回复。"
+    raw_reply = ("保留这段可见文本🙂世界。" * 220) + ("<think>内部推理🔒</think>" * 180) + (
+        "再保留这一段Привет🌍。" * 220
+    )
+    sanitized_reply = ("保留这段可见文本🙂世界。" * 220) + ("再保留这一段Привет🌍。" * 220)
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = raw_reply
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.return_value = transcript_text
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_bytes(b"\x02" * 512)
+            ws.send_json({"type": "stop"})
+
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": transcript_text}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+
+            llm_event = ws.receive_json()
+            assert llm_event["type"] == "llm_response"
+            assert llm_event["text"] == sanitized_reply
+            assert "<think>" not in llm_event["text"]
+            assert "内部推理" not in llm_event["text"]
+            assert "保留这段可见文本🙂世界。" in llm_event["text"]
+            assert "再保留这一段Привет🌍。" in llm_event["text"]
+
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+
+def test_sanitize_llm_reply_suppresses_think_blocks_and_preserves_unicode() -> None:
+    """Visible unicode text should survive while <think> blocks are removed."""
+    raw_reply = "Привет 🌍<think>internal 推理 🤫</think>你好\n<think>скрыто</think>🙂"
+
+    assert sanitize_llm_reply(raw_reply) == "Привет 🌍你好\n🙂"
+
+
+def test_sanitize_llm_reply_truncates_open_ended_think_blocks() -> None:
+    """Malformed think blocks should drop everything from the first <think onward."""
+    raw_reply = "可见前缀🙂<think>private 推理 🤫"
+
+    assert sanitize_llm_reply(raw_reply) == "可见前缀🙂"
+
+
+def test_llm_response_suppresses_think_blocks_and_history_uses_sanitized_reply() -> None:
+    """Sanitized assistant text should be sent and persisted in conversation history."""
+    raw_reply = "Ответ: Привет<think>private 推理 🤫</think>你好 🙂"
+    sanitized_reply = "Ответ: Привет你好 🙂"
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = [raw_reply, "Second reply"]
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.side_effect = ["first prompt", "second prompt"]
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "first prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": sanitized_reply}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "second prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": "Second reply"}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+    second_call = mock_llm.chat.await_args_list[1]
+    assert second_call.kwargs["history"] == [
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": sanitized_reply},
+    ]
+
+
+def test_open_ended_think_block_is_truncated_in_websocket_response_and_history() -> None:
+    """Open-ended think output should be truncated before send and history persistence."""
+    raw_reply = "Visible🙂世界<think>private 推理 🤫"
+    sanitized_reply = "Visible🙂世界"
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = [raw_reply, "Second reply"]
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.side_effect = ["first prompt", "second prompt"]
+
+        with _make_client() as client, _ws_connect(client) as ws:
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "first prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": sanitized_reply}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+            ws.send_json({"type": "start"})
+            assert ws.receive_json() == {"type": "status", "state": "buffering"}
+            ws.send_json({"type": "stop"})
+            assert ws.receive_json() == {"type": "status", "state": "transcribing"}
+            assert ws.receive_json() == {"type": "transcript", "text": "second prompt"}
+            assert ws.receive_json() == {"type": "status", "state": "thinking"}
+            assert ws.receive_json() == {"type": "llm_response", "text": "Second reply"}
+            assert ws.receive_json() == {"type": "status", "state": "idle"}
+
+    second_call = mock_llm.chat.await_args_list[1]
+    assert second_call.kwargs["history"] == [
+        {"role": "user", "content": "first prompt"},
+        {"role": "assistant", "content": sanitized_reply},
     ]
 
 
@@ -261,6 +453,53 @@ def test_client_disconnect_does_not_crash_server() -> None:
                 ws.send_json({"type": "start"})
                 ws.receive_json()  # BUFFERING
                 # Close without stop — simulates abrupt disconnect
+
+
+async def test_disconnect_during_llm_response_send_uses_existing_disconnect_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A peer-close during llm_response send should exit via the disconnect path."""
+    caplog.set_level(logging.INFO)
+    websocket = MagicMock()
+    websocket.client = ("testclient", 1234)
+    websocket.app.state.whisper_model = object()
+    websocket.accept = AsyncMock()
+    websocket.receive = AsyncMock(
+        side_effect=[
+            {"text": json.dumps({"type": "start"})},
+            {"text": json.dumps({"type": "stop"})},
+        ]
+    )
+
+    sent_payloads: list[dict[str, str]] = []
+
+    async def _send_text(payload: str) -> None:
+        event = json.loads(payload)
+        sent_payloads.append(event)
+        if event["type"] == "llm_response":
+            raise WebSocketDisconnect()
+
+    websocket.send_text = AsyncMock(side_effect=_send_text)
+
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = "Visible🙂<think>private</think>世界"
+
+    with (
+        patch(_PATCH_TRANSCRIBE, new_callable=AsyncMock) as mock_transcribe,
+        patch(_PATCH_LLM_CLS, return_value=mock_llm),
+    ):
+        mock_transcribe.return_value = "hello"
+        await ws_audio_module.ws_audio(websocket)
+
+    assert sent_payloads == [
+        {"type": "status", "state": "buffering"},
+        {"type": "status", "state": "transcribing"},
+        {"type": "transcript", "text": "hello"},
+        {"type": "status", "state": "thinking"},
+        {"type": "llm_response", "text": "Visible🙂世界"},
+    ]
+    assert "disconnect during send type=llm_response" in caplog.text
+    assert "client disconnected state=LLM_CALLING" in caplog.text
 
 
 # ---------------------------------------------------------------------------

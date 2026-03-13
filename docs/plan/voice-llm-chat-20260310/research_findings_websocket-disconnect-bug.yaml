@@ -1,0 +1,325 @@
+plan_id: voice-llm-chat-20260310
+objective: Investigate websocket disconnect during llm_response send
+focus_area: websocket-disconnect-bug
+created_at: "2026-03-12"
+created_by: copilot-cli
+status: completed
+
+tldr: |
+  - Backend send path in `backend/app/ws/audio.py` logs and re-raises disconnects from `websocket.send_text`; the observed `state=LLM_CALLING` is expected because state resets to IDLE only after the llm_response send succeeds.
+  - Existing backend and frontend tests already prove unicode and moderately large unicode llm_response payloads round-trip correctly, but there is no test for a disconnect that occurs during `llm_response` send or for frontend close behavior around that message.
+  - Frontend WebSocket code does not close on `llm_response`, payload content, `<think>` tags, or unicode; the only explicit close path is React cleanup/unmount with code 1000.
+  - The observed 5.6 KB payload size is small for WebSocket text frames; special characters are much less likely than the client/browser/runtime intentionally or unintentionally closing the socket before or during receipt.
+
+research_metadata:
+  methodology: >
+    Targeted code inspection of backend websocket handler, backend websocket tests,
+    frontend websocket parsing/rendering path, and targeted test execution for the
+    relevant backend and frontend suites.
+  tools_used:
+    - rg
+    - view
+    - bash
+    - apply_patch
+  scope: >
+    Investigated the backend `/ws/audio` send path and state machine, backend websocket
+    tests, frontend websocket message consumer and assistant rendering utilities, and
+    whether unicode / large payload handling is already covered.
+  confidence: high
+  coverage: 85
+
+files_analyzed:
+  - file: audio.py
+    path: /Users/myh/Documents/speak-to-llm/backend/app/ws/audio.py
+    purpose: WebSocket endpoint and send/state handling for audio transcription and LLM replies
+    key_elements:
+      - element: ws_audio
+        type: function
+        location: backend/app/ws/audio.py:26
+        description: Main WebSocket state machine for start/binary/stop, transcription, LLM call, and disconnect handling
+      - element: _send
+        type: function
+        location: backend/app/ws/audio.py:56
+        description: Serializes payload with `ensure_ascii=False`, logs payload byte size, and sends via `websocket.send_text`
+      - element: llm_response send path
+        type: pattern
+        location: backend/app/ws/audio.py:154-166
+        description: Conversation history is extended before `llm_response` is sent; state changes to IDLE only after send succeeds
+      - element: disconnect handling
+        type: pattern
+        location: backend/app/ws/audio.py:67-76,185-192
+        description: Send-time disconnect is logged and re-raised; outer handler logs client disconnected with current state
+    language: Python
+    lines: 194
+  - file: test_ws_audio.py
+    path: /Users/myh/Documents/speak-to-llm/backend/tests/test_ws_audio.py
+    purpose: End-to-end websocket tests for /ws/audio
+    key_elements:
+      - element: unicode websocket round-trip
+        type: function
+        location: backend/tests/test_ws_audio.py:122-147
+        description: Verifies unicode transcript and llm_response survive backend websocket flow
+      - element: large unicode websocket round-trip
+        type: function
+        location: backend/tests/test_ws_audio.py:150-178
+        description: Verifies a long unicode llm_response is delivered intact
+      - element: client disconnect coverage
+        type: function
+        location: backend/tests/test_ws_audio.py:309-323
+        description: Covers disconnect after start, but not during transcript/llm_response send
+    language: Python
+    lines: 342
+  - file: useWebSocket.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/hooks/useWebSocket.ts
+    purpose: Browser websocket lifecycle management and message dispatch
+    key_elements:
+      - element: onmessage
+        type: function
+        location: frontend/src/hooks/useWebSocket.ts:104-121
+        description: Parses text frames and dispatches SERVER_MSG without any close logic
+      - element: onclose reconnect policy
+        type: pattern
+        location: frontend/src/hooks/useWebSocket.ts:131-150
+        description: Auto-reconnect only on close codes 1006 and 1011
+      - element: cleanup close path
+        type: pattern
+        location: frontend/src/hooks/useWebSocket.ts:156-166
+        description: Explicitly closes with code 1000 only during hook cleanup/unmount
+    language: TypeScript
+    lines: 172
+  - file: ws.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/types/ws.ts
+    purpose: Frontend server message parser
+    key_elements:
+      - element: parseServerMessage
+        type: function
+        location: frontend/src/types/ws.ts:16-43
+        description: Uses `JSON.parse` and accepts llm_response text as any string, including unicode
+    language: TypeScript
+    lines: 43
+  - file: assistantMessage.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/utils/assistantMessage.ts
+    purpose: Splits assistant text into normal and `<think>` segments for rendering
+    key_elements:
+      - element: THINK_TAG_PATTERN
+        type: variable
+        location: frontend/src/utils/assistantMessage.ts:6
+        description: Regex that extracts `<think>...</think>` blocks
+      - element: splitAssistantMessage
+        type: function
+        location: frontend/src/utils/assistantMessage.ts:8-35
+        description: Converts assistant text into renderable text/think segments; does not manipulate websocket lifecycle
+    language: TypeScript
+    lines: 36
+  - file: MessageBubble.tsx
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/components/MessageBubble.tsx
+    purpose: Renders assistant messages, including think-tag segments
+    key_elements:
+      - element: assistant segment rendering
+        type: pattern
+        location: frontend/src/components/MessageBubble.tsx:29-38
+        description: Renders split assistant segments as spans; no close or message rejection logic
+    language: TSX
+    lines: 42
+  - file: ws.test.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/types/ws.test.ts
+    purpose: Frontend parser tests for unicode and large llm_response payloads
+    key_elements:
+      - element: unicode parser coverage
+        type: function
+        location: frontend/src/types/ws.test.ts:6-20
+        description: Confirms unicode transcript and llm_response parsing
+      - element: large unicode parser coverage
+        type: function
+        location: frontend/src/types/ws.test.ts:22-31
+        description: Confirms large unicode llm_response parsing
+    language: TypeScript
+    lines: 32
+  - file: assistantMessage.test.ts
+    path: /Users/myh/Documents/speak-to-llm/frontend/src/utils/assistantMessage.test.ts
+    purpose: Tests rendering-oriented `<think>` tag splitting
+    key_elements:
+      - element: think-tag extraction
+        type: function
+        location: frontend/src/utils/assistantMessage.test.ts:12-27
+        description: Confirms `<think>` blocks are split into separate segments
+    language: TypeScript
+    lines: 27
+
+patterns_found:
+  - category: architecture
+    pattern: send-time state remains LLM_CALLING until llm_response send completes
+    description: >
+      The backend sets `state = LLM_CALLING`, computes the reply, logs reply size,
+      sends `llm_response`, and only then sets state to IDLE. A disconnect during
+      send therefore naturally logs as `LLM_CALLING`.
+    examples:
+      - file: backend/app/ws/audio.py
+        location: backend/app/ws/audio.py:135-166
+        snippet: |
+          state = _State.LLM_CALLING
+          await _send({"type": "status", "state": "thinking"})
+          reply = await llm.chat(text, history=list(conversation_history))
+          conversation_history.extend([user_message, {"role": "assistant", "content": reply}])
+          await _send({"type": "llm_response", "text": reply})
+          state = _State.IDLE
+    prevalence: common
+  - category: structure
+    pattern: backend serializes websocket text with native unicode preserved
+    description: >
+      The backend uses `json.dumps(..., ensure_ascii=False)` and logs byte counts using
+      UTF-8 encoding, so Cyrillic and CJK text are intentionally supported.
+    examples:
+      - file: backend/app/ws/audio.py
+        location: backend/app/ws/audio.py:56-58
+        snippet: |
+          payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+          payload_size = len(payload.encode("utf-8"))
+    prevalence: common
+  - category: architecture
+    pattern: frontend llm_response consumption is parse-and-dispatch only
+    description: >
+      The frontend does not inspect content for special characters before dispatching
+      llm_response; it parses JSON, dispatches to the reducer, and renders.
+    examples:
+      - file: frontend/src/hooks/useWebSocket.ts
+        location: frontend/src/hooks/useWebSocket.ts:104-115
+        snippet: |
+          const msg = parseServerMessage(ev.data)
+          if (msg !== null) {
+            dispatchRef.current({ type: 'SERVER_MSG', msg })
+          }
+      - file: frontend/src/store/chatReducer.ts
+        location: frontend/src/store/chatReducer.ts:143-151
+        snippet: |
+          if (msg.type === 'llm_response') {
+            return {
+              ...state,
+              phase: 'responding',
+              messages: [...state.messages, { id: crypto.randomUUID(), role: 'assistant', text: msg.text, timestamp: Date.now() }],
+            }
+          }
+    prevalence: common
+  - category: testing
+    pattern: unicode and large payload tests exist, send-time disconnect tests do not
+    description: >
+      Existing tests validate unicode/large payload correctness, but not a client close
+      racing with transcript or llm_response delivery.
+    examples:
+      - file: backend/tests/test_ws_audio.py
+        location: backend/tests/test_ws_audio.py:122-178
+        snippet: |
+          def test_unicode_transcript_and_llm_response_round_trip_over_websocket() -> None: ...
+          def test_large_unicode_llm_response_round_trip_over_websocket() -> None: ...
+      - file: backend/tests/test_ws_audio.py
+        location: backend/tests/test_ws_audio.py:309-323
+        snippet: |
+          def test_client_disconnect_does_not_crash_server() -> None: ...
+    prevalence: common
+
+related_architecture:
+  components_relevant_to_domain:
+    - component: /ws/audio handler
+      responsibility: Receive audio/control frames, transcribe audio, call LLM, send transcript and llm_response events
+      location: backend/app/ws/audio.py
+      relationship_to_domain: primary investigated component
+    - component: frontend websocket hook
+      responsibility: Maintain browser WebSocket connection and dispatch parsed server events
+      location: frontend/src/hooks/useWebSocket.ts
+      relationship_to_domain: consumes llm_response and can explicitly close only on cleanup
+    - component: assistant renderer
+      responsibility: Split `<think>` blocks for display and render message segments
+      location: frontend/src/utils/assistantMessage.ts and frontend/src/components/MessageBubble.tsx
+      relationship_to_domain: post-receive rendering path for suspect payload contents
+  interfaces_used_by_domain:
+    - interface: fastapi.WebSocket.send_text
+      location: backend/app/ws/audio.py:67
+      usage_pattern: sends serialized JSON text payloads; raises on disconnect
+    - interface: browser WebSocket.onmessage/onclose/close
+      location: frontend/src/hooks/useWebSocket.ts:104-166
+      usage_pattern: parses incoming text frames and only closes explicitly during cleanup
+  data_flow_involving_domain: |
+    backend receives `stop`
+      -> state TRANSCRIBING -> send transcript
+      -> state LLM_CALLING -> send `status: thinking`
+      -> await llm.chat(...)
+      -> send `llm_response`
+      -> set state IDLE -> send `status: idle`
+
+    frontend receives websocket text frame
+      -> `parseServerMessage`
+      -> `dispatch({ type: 'SERVER_MSG', msg })`
+      -> reducer appends assistant message
+      -> `splitAssistantMessage` and `MessageBubble` render text / think segments
+  key_relationships_to_domain:
+    - from: backend/app/ws/audio.py
+      to: app.services.llm_client.LLMClient
+      relationship: calls
+    - from: frontend/src/hooks/useWebSocket.ts
+      to: frontend/src/types/ws.ts
+      relationship: calls
+    - from: frontend/src/hooks/useWebSocket.ts
+      to: frontend/src/store/chatReducer.ts
+      relationship: dispatches to
+    - from: frontend/src/components/MessageBubble.tsx
+      to: frontend/src/utils/assistantMessage.ts
+      relationship: calls
+
+related_technology_stack:
+  languages_used_in_domain:
+    - Python
+    - TypeScript
+    - TSX
+  frameworks_used_in_domain:
+    - name: FastAPI
+      usage_in_domain: websocket endpoint implementation
+    - name: React
+      usage_in_domain: websocket consumer and assistant message rendering
+    - name: Vitest
+      usage_in_domain: frontend parser and think-tag tests
+    - name: pytest
+      usage_in_domain: backend websocket endpoint tests
+  libraries_used_in_domain:
+    - name: starlette.testclient
+      purpose_in_domain: backend websocket integration tests
+  external_apis_used_in_domain: []
+
+related_conventions:
+  naming_patterns_in_domain: Server frames use `type`-tagged JSON messages; frontend action names are SCREAMING_SNAKE and backend websocket state enum uses `_State`.
+  structure_of_domain: Backend keeps a single connection-local state machine; frontend separates websocket lifecycle, reducer state, and assistant rendering helpers.
+  error_handling_in_domain: Backend logs and re-raises send-time disconnects; frontend ignores unparseable messages and treats socket errors/close as lifecycle events.
+  testing_in_domain: Existing tests emphasize round-trip correctness for happy-path, unicode, large unicode payloads, and coarse disconnect handling.
+  documentation_in_domain: Inline docstrings/comments describe websocket protocol and reconnect policy.
+
+related_dependencies:
+  internal:
+    - component: app.services.transcriber
+      relationship_to_domain: provides transcription before llm_response
+      direction: outbound
+    - component: app.services.llm_client
+      relationship_to_domain: provides reply text sent as llm_response
+      direction: outbound
+    - component: frontend/src/types/ws.ts
+      relationship_to_domain: validates incoming llm_response payloads
+      direction: outbound
+  external:
+    - name: fastapi
+      purpose_for_domain: websocket server API
+    - name: uvicorn[standard]
+      purpose_for_domain: ASGI runtime with websocket support
+    - name: react
+      purpose_for_domain: browser UI and websocket lifecycle integration
+
+open_questions:
+  - question: What browser close code and reason were observed on the client for the failing session?
+    context: The backend only proves the peer disconnected during send; it does not identify whether the client closed normally, crashed, navigated away, or hit a browser/runtime error.
+  - question: Is there any reverse proxy between browser and backend that could rewrite or terminate websocket frames?
+    context: The investigated application code does not impose a 5.6 KB message limit, so an intermediary would be the remaining non-client path.
+
+gaps:
+  - area: backend send-race coverage
+    description: No test simulates client disconnect during transcript or llm_response send.
+    impact: Leaves the exact send-failure behavior and logging sequence unverified under the suspected production race.
+  - area: frontend lifecycle coverage
+    description: No automated test covers `useWebSocket` close behavior, cleanup-triggered close, or receipt of a long `<think>`-heavy llm_response through the actual hook/reducer/render path.
+    impact: It is not directly verified in tests that the browser-side code remains mounted and does not close during end-to-end receipt of the suspect content.

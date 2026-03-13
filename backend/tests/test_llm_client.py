@@ -112,3 +112,25 @@ async def test_chat_empty_transcript_sends_empty_user_message(
     messages = mock_openai.chat.completions.create.call_args.kwargs["messages"]
     assert messages[-1] == {"role": "user", "content": ""}
     assert result == ""
+
+
+async def test_chat_preserves_unicode_transcript_and_history(
+    settings: Settings, mock_openai: MagicMock
+) -> None:
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_make_completion("这是一个测试回复。")
+    )
+
+    history = [
+        {"role": "user", "content": "上一轮问题：请用中文回答。"},
+        {"role": "assistant", "content": "好的，我会使用中文。"},
+    ]
+    transcript = "请解释一下这个错误日志。"
+
+    client = LLMClient(settings=settings)
+    result = await client.chat(transcript, history=history)
+
+    messages = mock_openai.chat.completions.create.call_args.kwargs["messages"]
+    assert messages[1:3] == history
+    assert messages[3] == {"role": "user", "content": transcript}
+    assert result == "这是一个测试回复。"

@@ -101,13 +101,23 @@ export function useAudioStream(
 
   const wsSend = useCallback((data: string | ArrayBuffer) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      if (typeof data === 'string') {
+        console.debug('[audio] sending websocket event', data)
+      }
       wsRef.current.send(data)
+      return
     }
+
+    console.warn('[audio] skipped websocket send because socket is not open', {
+      readyState: wsRef.current?.readyState ?? 'missing',
+      payloadType: typeof data === 'string' ? 'text' : 'binary',
+    })
   }, [wsRef])
 
   // ── Cleanup helper ──────────────────────────────────────────────────────────
 
   const teardown = useCallback(() => {
+    console.debug('[audio] tearing down audio graph')
     workletRef.current?.port.close()
     workletRef.current?.disconnect()
     workletRef.current = null
@@ -133,6 +143,7 @@ export function useAudioStream(
     dispatch({ type: 'MIC_REQUESTING' })
 
     try {
+      console.info('[audio] requesting microphone access')
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Microphone access is not supported in this browser')
       }
@@ -200,6 +211,7 @@ export function useAudioStream(
       wsSend(START_EVENT)
 
       // Mic is live — transition to recording phase.
+      console.info('[audio] recording started')
       dispatch({ type: 'RECORD_START' })
     } catch (err) {
       teardown()
@@ -211,6 +223,7 @@ export function useAudioStream(
             : err instanceof Error
               ? err.message
               : 'Could not start the microphone.'
+      console.error('[audio] failed to start recording', err)
       dispatch({ type: 'MIC_ERROR', error: message })
     }
   }, [teardown, dispatch, wsSend])
@@ -218,6 +231,7 @@ export function useAudioStream(
   const stopRecording = useCallback(() => {
     // Tell the backend the utterance has ended before releasing resources so
     // the stop frame is guaranteed to be sent over an open socket.
+    console.info('[audio] stopping recording')
     wsSend(STOP_EVENT)
     teardown()
     dispatch({ type: 'RECORD_STOP' })

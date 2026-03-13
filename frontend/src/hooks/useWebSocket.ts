@@ -41,8 +41,10 @@ export function useWebSocket(
   dispatch: Dispatch<ChatAction>,
 ): WebSocketHandle {
   const wsRef = useRef<WebSocket | null>(null)
+  const dispatchRef = useRef(dispatch)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryCountRef = useRef(0)
+  const connectionIdRef = useRef(0)
   const [wsStatus, setWsStatus] = useState<WsStatus>('closed')
 
   /**
@@ -50,6 +52,10 @@ export function useWebSocket(
    * in-flight connection do not mutate state after cleanup.
    */
   const deadRef = useRef(false)
+
+  useEffect(() => {
+    dispatchRef.current = dispatch
+  }, [dispatch])
 
   useEffect(() => {
     deadRef.current = false
@@ -64,9 +70,9 @@ export function useWebSocket(
     function setStatus(s: WsStatus) {
       setWsStatus(s)
       switch (s) {
-        case 'connecting': dispatch({ type: 'WS_CONNECTING' }); break
-        case 'open':       dispatch({ type: 'WS_OPEN' });       break
-        case 'closed':     dispatch({ type: 'WS_CLOSED' });     break
+        case 'connecting': dispatchRef.current({ type: 'WS_CONNECTING' }); break
+        case 'open':       dispatchRef.current({ type: 'WS_OPEN' });       break
+        case 'closed':     dispatchRef.current({ type: 'WS_CLOSED' });     break
         // 'error' is dispatched directly with a message below
       }
     }
@@ -76,39 +82,70 @@ export function useWebSocket(
       clearRetry()
       setStatus('connecting')
 
+      connectionIdRef.current += 1
+      const connectionId = connectionIdRef.current
+      console.info(`[ws:${connectionId}] connecting`, { wsUrl, retryCount: retryCountRef.current })
+
       const ws = new WebSocket(wsUrl)
       ws.binaryType = 'arraybuffer'
       wsRef.current = ws
 
       ws.onopen = () => {
-        if (deadRef.current) { ws.close(); return }
+        if (deadRef.current) {
+          console.warn(`[ws:${connectionId}] opened after cleanup; closing stale socket`)
+          ws.close(1000, 'component cleaned up')
+          return
+        }
         retryCountRef.current = 0
+        console.info(`[ws:${connectionId}] open`)
         setStatus('open')
       }
 
       ws.onmessage = (ev: MessageEvent) => {
         if (typeof ev.data === 'string') {
           const msg = parseServerMessage(ev.data)
-          if (msg !== null) dispatch({ type: 'SERVER_MSG', msg })
+          if (msg !== null) {
+            console.debug(`[ws:${connectionId}] message`, {
+              type: msg.type,
+              textLength: 'text' in msg ? msg.text.length : undefined,
+              errorLength: 'message' in msg ? msg.message.length : undefined,
+              rawLength: ev.data.length,
+            })
+            dispatchRef.current({ type: 'SERVER_MSG', msg })
+          } else {
+            console.warn(`[ws:${connectionId}] ignored unparseable message`, {
+              rawLength: ev.data.length,
+            })
+          }
         }
       }
 
       ws.onerror = () => {
         // onerror is always followed by onclose; broadcast error state so
         // the UI can show feedback, then let onclose decide whether to retry.
+        console.error(`[ws:${connectionId}] error event`)
         setWsStatus('error')
-        dispatch({ type: 'WS_ERROR', error: 'WebSocket connection failed' })
+        dispatchRef.current({ type: 'WS_ERROR', error: 'WebSocket connection failed' })
       }
 
       ws.onclose = (ev: CloseEvent) => {
-        wsRef.current = null
+        if (wsRef.current === ws) {
+          wsRef.current = null
+        }
         if (deadRef.current) return
 
+        console.warn(`[ws:${connectionId}] closed`, {
+          code: ev.code,
+          reason: ev.reason,
+          wasClean: ev.wasClean,
+          bufferedAmount: ws.bufferedAmount,
+        })
         setStatus('closed')
 
         if (RECONNECT_CODES.has(ev.code)) {
           const delay = Math.min(BACKOFF_BASE_MS * 2 ** retryCountRef.current, BACKOFF_MAX_MS)
           retryCountRef.current += 1
+          console.info(`[ws:${connectionId}] scheduling reconnect`, { delay })
           retryTimerRef.current = setTimeout(connect, delay)
         }
       }
@@ -119,11 +156,17 @@ export function useWebSocket(
     return () => {
       deadRef.current = true
       clearRetry()
-      wsRef.current?.close()
+      const ws = wsRef.current
+      if (ws !== null) {
+        console.info('[ws] cleanup closing socket', {
+          readyState: ws.readyState,
+          url: ws.url,
+        })
+        ws.close(1000, 'component cleanup')
+      }
       wsRef.current = null
     }
-    // wsUrl and dispatch are both stable across the component lifetime.
-  }, [wsUrl, dispatch])
+  }, [wsUrl])
 
   return { wsRef, wsStatus }
 }
